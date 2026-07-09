@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+/*
+  This section makes the default HTML/React background completely invisible,
+  which is required for the transparent Tauri window to work correctly.
+*/
+html,
+body,
+#root {
+  background-color: transparent;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  /*
+    IMPORTANT: overflow must stay hidden on html/body to avoid any
+    scrollbars appearing on the transparent window, but this does NOT
+    fix content being clipped by the window's fixed pixel size.
+    That clipping is solved at the component layout level (see notes below),
+    not here.
+  */
+  overflow: hidden;
+}
+
+/*
+  Allow shadows/effects that extend beyond the widget's own box
+  (e.g. the drop shadow under the Mocu cube) to not be clipped
+  by any intermediate wrapper div, only by the actual OS window bounds.
+  If your root layout wrapper (the direct child of #root) currently has
+  "overflow: hidden" or "overflow-hidden" from Tailwind, remove it and
+  keep overflow control only on html/body as above.
+*/
+#root > * {
+  overflow: visible;
+}
+
+/* Tauri drag region configuration */
+[data-tauri-drag-region] {
+  user-select: none;
+  -webkit-user-select: none;
+  /* 'app-region' is non-standard, kept for Tauri/webview compatibility */
+  app-region: drag;
+  -webkit-app-region: drag;
+}
+
+/* Cursor utilities */
+.cursor-grab {
+  cursor: -webkit-grab;
+  cursor: grab;
+}
+
+.cursor-grabbing {
+  cursor: -webkit-grabbing;
+  cursor: grabbing;
+}
