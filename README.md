@@ -1,7 +1,7 @@
 # 🤖 Mocu - Personal AI Assistant
 
 <p align="center">
-  <img src="mocu\public\gitlogo.png" alt="Mocu Logo" width="150"/>
+  <img src="public/gitlogo.png" alt="Mocu Logo" width="150"/>
 </p>
 
 <p align="center">
