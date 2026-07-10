@@ -119,21 +119,19 @@ export const callMainAgent = async (state: typeof GraphState.State) => {
     - If you notice a significant shift in the user's emotional state, a change in their goals/preferences, or when they share crucial new personal details, use the "generate_personalized_prompt" tool to update your personality and behavior accordingly.
     - If the user wants to interact with the OS terminal, run commands, manage files, check system status, create/edit files, run scripts, or check system time/date, use the "terminal_intent_executor" tool.
 
-    👇 [SEARCH vs RESEARCH — CRITICAL DECISION RULE]:
-    - Use "perplexity_search" ONLY for extremely simple, single-fact, throwaway questions that need a one-line answer (e.g., "current weather", "what time is it in Tokyo", "who is the president of X", "score of yesterday's match"). This tool is shallow and fast, but NOT accurate for complex or important topics.
+    [SEARCH vs RESEARCH — CRITICAL DECISION RULE]:
+    - Use "perplexity_search" as your DEFAULT tool for general web searches, finding information, looking up the latest news, or answering general knowledge questions. This includes any requests containing phrases like "search for", "find", "find the latest", "جستجو کن", "پیدا کن", "آخرین خبر را پیدا کن", or "آخرین وضعیت".
     
-    - Use "execute_research_pipeline" for EVERYTHING ELSE that requires depth, accuracy, or multi-step reasoning, including:
-      • When the user explicitly says words like "research", "تحقیق کن", "دقیق بررسی کن", "تحلیل کن", "بررسی کامل کن".
-      • When the user asks a question that needs a PRECISE, well-verified, or detailed answer (not just a quick guess).
-      • When the user wants analysis of stocks, markets, news trends, technical/complex topics, or multi-source verification.
-      • When the user wants their local files/folder analyzed.
+    - Use "execute_research_pipeline" ONLY for tasks that explicitly require deep, multi-step analytical research, comprehensive reports, multi-source verification, or when the user wants their local files/folders analyzed.
+      * Trigger this if the user uses explicit research terms like "research", "تحقیق کن", "دقیق بررسی کن", "تحلیل کن", "بررسی کامل کن".
+      * Trigger this if the task is a complex, multi-layered research project that cannot be answered with a quick web search.
     
     - CRITICAL: The "execute_research_pipeline" accepts an OPTIONAL "sourceFolderPath":
-      • If the user explicitly gives a folder path OR says "analyze my files/folder", pass that absolute path as "sourceFolderPath".
-      • If the user is just asking a deep/precise question WITHOUT mentioning any local files or folder, call "execute_research_pipeline" anyway and pass "sourceFolderPath" as an empty string (""). The tool is capable of researching purely from the web/autonomous search in that case — DO NOT ask the user for a folder path unless they clearly mean local file analysis.
-      • Only ask the user for the folder path if they explicitly say something like "تحلیل فایل‌های من" or "تحقیق روی اسناد من" but forgot to give the path.
+      * If the user explicitly gives a folder path OR says "analyze my files/folder", pass that absolute path as "sourceFolderPath".
+      * If the user is just asking a deep/precise question WITHOUT mentioning any local files or folder, call "execute_research_pipeline" anyway and pass "sourceFolderPath" as an empty string (""). The tool is capable of researching purely from the web/autonomous search in that case — DO NOT ask the user for a folder path unless they clearly mean local file analysis.
+      * Only ask the user for the folder path if they explicitly say something like "تحلیل فایل‌های من" or "تحقیق روی اسناد من" but forgot to give the path.
     
-    - TIE-BREAKER RULE: If you are unsure whether a question needs a quick search or deep research, ALWAYS prefer "execute_research_pipeline". Depth and accuracy matter more than speed.
+    - TIE-BREAKER RULE: If the user wants to search for something, find the latest information, or look up a fact, ALWAYS prefer "perplexity_search". Only choose "execute_research_pipeline" if the request is clearly a complex research task.
 
     [CRITICAL RULE FOR MULTIPLE TOOLS (STEP-BY-STEP REASONING)]:
     - NEVER call "memory_action" and "desktop_vision_action" at the exact same time if the memory depends on what is on the screen.

@@ -38,7 +38,6 @@ export const desktopVisionTool = tool(
         configuration: {
           baseURL: baseURL || undefined // Uses default OpenAI base URL if empty
         },
-        temperature: 0.1 // Low temperature for accurate image analysis
       });
 
       console.log("[Vision Tool] Sending multimodal request to the vision model...");

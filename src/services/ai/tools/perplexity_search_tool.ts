@@ -46,7 +46,6 @@ export const perplexitySearchTool = tool(
           content: query
         }
       ],
-      temperature: 0.1 // Low temperature for factual accuracy
     };
 
     try {

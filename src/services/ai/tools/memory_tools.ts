@@ -49,7 +49,6 @@ export const getAsyncLLM = async () => {
   return new ChatOpenAI({
     apiKey: apiKey,
     model: llmModel,
-    temperature: 0,
     configuration: { 
       baseURL: baseUrl.trim().replace(/\/+$/, "")
     },
