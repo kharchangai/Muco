@@ -1,46 +1,118 @@
+// src/services/ai/index.ts
 import { HumanMessage } from "@langchain/core/messages";
 import { workflow } from "./graph";
 
 const app = workflow.compile();
 
-export const chatWithMocu = async (userInput: string): Promise<string> => {
+const throwIfAborted = (
+  signal?: AbortSignal,
+): void => {
+  if (signal?.aborted) {
+    throw new DOMException(
+      "The operation was cancelled.",
+      "AbortError",
+    );
+  }
+};
+
+export const chatWithMocu = async (
+  userInput: string,
+  signal?: AbortSignal,
+): Promise<string> => {
+  throwIfAborted(signal);
+
   try {
+    const cleanUserInput = userInput.trim();
+
+    if (!cleanUserInput) {
+      throw new Error("User input cannot be empty.");
+    }
+
     const inputs = {
-      messages: [new HumanMessage(userInput)],
+      messages: [
+        new HumanMessage(cleanUserInput),
+      ],
     };
 
-    const finalState = await app.invoke(inputs);
-    
-    if (!finalState.messages || finalState.messages.length === 0) {
+    /*
+     * Passing signal to LangGraph lets supported nodes and nested
+     * LangChain calls stop when AbortController.abort() is called.
+     */
+    const finalState = await app.invoke(
+      inputs,
+      {
+        signal,
+      },
+    );
+
+    throwIfAborted(signal);
+
+    if (
+      !finalState.messages ||
+      finalState.messages.length === 0
+    ) {
       return "No messages returned from graph.";
     }
 
-    const lastMessage = finalState.messages[finalState.messages.length - 1];
+    const lastMessage =
+      finalState.messages[
+        finalState.messages.length - 1
+      ];
+
     const content = lastMessage.content;
 
-    // 1. If content is already a plain string
     if (typeof content === "string") {
-      return content;
+      return content.trim();
     }
 
-    // 2. If content is an array of blocks (common in newer LangChain versions)
     if (Array.isArray(content)) {
       return content
         .map((block) => {
-          if (typeof block === "string") return block;
-          if (block && typeof block === "object" && "text" in block) {
-            return (block as any).text;
+          if (typeof block === "string") {
+            return block;
           }
+
+          if (
+            block &&
+            typeof block === "object" &&
+            "text" in block &&
+            typeof block.text === "string"
+          ) {
+            return block.text;
+          }
+
           return "";
         })
-        .join("");
+        .join("")
+        .trim();
     }
 
-    // 3. Fallback
-    return JSON.stringify(content);
+    if (content === null || content === undefined) {
+      return "";
+    }
 
-  } catch (error) {
+    return JSON.stringify(content);
+  } catch (error: unknown) {
+    /*
+     * An interruption is expected behavior, not an AI failure.
+     * Re-throw it so App.tsx can silently stop the current pipeline.
+     */
+    if (
+      error instanceof DOMException &&
+      error.name === "AbortError"
+    ) {
+      throw error;
+    }
+
+    if (
+      error instanceof Error &&
+      error.name === "AbortError"
+    ) {
+      throw error;
+    }
+
     console.error("Error in Mocu Graph:", error);
-    return "I encounter an error while processing your request.";
+
+    return "I encountered an error while processing your request.";
   }
 };

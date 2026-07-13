@@ -9,8 +9,9 @@ import {
 } from './components/MocuTranscript';
 
 import {
-  transcribeAudio,
   generateSpeech,
+  isAbortError,
+  transcribeAudio,
 } from './services/aiService';
 
 import { chatWithMocu } from './services/ai/index';
@@ -22,11 +23,13 @@ type ActivityEvent = {
   isRunning: boolean;
 };
 
-// These values must match the main Tauri window configuration.
+type MocuInterruptEvent = {
+  reason: 'user-click';
+  timestamp: number;
+};
+
 const MAIN_WINDOW_WIDTH = 250;
 const MAIN_WINDOW_BASE_HEIGHT = 320;
-
-// This space is added only below Mocu when the transcript is visible.
 const TRANSCRIPT_EXTRA_HEIGHT = 170;
 
 function App() {
@@ -56,6 +59,25 @@ function App() {
   const currentAudioUrlRef =
     useRef<string | null>(null);
 
+  /*
+   * This controller belongs to the currently active AI pipeline.
+   *
+   * Calling abort() physically cancels browser fetch requests that
+   * receive its signal, including STT, LLM, and TTS requests.
+   */
+  const abortControllerRef =
+    useRef<AbortController | null>(null);
+
+  /*
+   * Every new pipeline receives an ID.
+   *
+   * The ID is still needed even with AbortController because:
+   * - microphone permission cannot be aborted directly;
+   * - a backend may ignore cancellation;
+   * - late callbacks or results must never update the UI.
+   */
+  const pipelineIdRef = useRef(0);
+
   const isSettingsWindow =
     window.location.hash === '#settings';
 
@@ -71,8 +93,10 @@ function App() {
 
     if (currentAudio) {
       currentAudio.pause();
+      currentAudio.currentTime = 0;
       currentAudio.onended = null;
       currentAudio.onerror = null;
+      currentAudio.src = '';
       currentAudioRef.current = null;
     }
 
@@ -82,10 +106,118 @@ function App() {
     }
   };
 
-  const playSpeech = async (text: string) => {
+  const abortActivePipeline = () => {
+    const controller = abortControllerRef.current;
+
+    if (controller && !controller.signal.aborted) {
+      controller.abort();
+    }
+
+    abortControllerRef.current = null;
+  };
+
+  const createNewPipeline = () => {
+    /*
+     * A new operation always cancels the previous network pipeline.
+     */
+    abortActivePipeline();
+
+    const pipelineId = pipelineIdRef.current + 1;
+    pipelineIdRef.current = pipelineId;
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    return {
+      pipelineId,
+      signal: controller.signal,
+    };
+  };
+
+  const dispatchInterruptEvent = () => {
+    const detail: MocuInterruptEvent = {
+      reason: 'user-click',
+      timestamp: Date.now(),
+    };
+
+    window.dispatchEvent(
+      new CustomEvent<MocuInterruptEvent>(
+        'mocu-interrupt',
+        { detail },
+      ),
+    );
+  };
+
+  const handleInterrupt = () => {
+    /*
+     * Invalidate every pending callback first.
+     */
+    pipelineIdRef.current += 1;
+
+    /*
+     * Cancel STT, LLM, TTS, and every fetch request that was given
+     * the active AbortSignal.
+     */
+    abortActivePipeline();
+
+    /*
+     * Stop voice playback immediately.
+     */
     stopCurrentAudio();
 
-    const speechBlob = await generateSpeech(text);
+    /*
+     * Stop microphone recording if it is active.
+     *
+     * Its onstop handler will safely exit because pipelineId changed.
+     */
+    const mediaRecorder = mediaRecorderRef.current;
+
+    if (
+      mediaRecorder &&
+      mediaRecorder.state !== 'inactive'
+    ) {
+      mediaRecorder.stop();
+    }
+
+    mediaRecorder?.stream
+      .getTracks()
+      .forEach((track) => track.stop());
+
+    mediaRecorderRef.current = null;
+    audioChunksRef.current = [];
+
+    setCurrentActivity(null);
+    setMocuState('idle');
+
+    dispatchInterruptEvent();
+  };
+
+  const playSpeech = async (
+    text: string,
+    pipelineId: number,
+    signal: AbortSignal,
+  ) => {
+    stopCurrentAudio();
+
+    if (
+      pipelineId !== pipelineIdRef.current ||
+      signal.aborted
+    ) {
+      return;
+    }
+
+    const speechBlob = await generateSpeech(
+      text,
+      signal,
+    );
+
+    if (
+      pipelineId !== pipelineIdRef.current ||
+      signal.aborted
+    ) {
+      return;
+    }
+
     const audioUrl = URL.createObjectURL(speechBlob);
     const audio = new Audio(audioUrl);
 
@@ -93,6 +225,9 @@ function App() {
     currentAudioUrlRef.current = audioUrl;
 
     const cleanUpAudio = () => {
+      audio.onended = null;
+      audio.onerror = null;
+
       if (currentAudioRef.current === audio) {
         currentAudioRef.current = null;
       }
@@ -105,13 +240,33 @@ function App() {
 
     audio.onended = () => {
       cleanUpAudio();
-      setMocuState('idle');
+
+      if (
+        pipelineId === pipelineIdRef.current &&
+        !signal.aborted
+      ) {
+        setMocuState('idle');
+      }
     };
 
     audio.onerror = () => {
       cleanUpAudio();
-      setMocuState('idle');
+
+      if (
+        pipelineId === pipelineIdRef.current &&
+        !signal.aborted
+      ) {
+        setMocuState('idle');
+      }
     };
+
+    if (
+      pipelineId !== pipelineIdRef.current ||
+      signal.aborted
+    ) {
+      cleanUpAudio();
+      return;
+    }
 
     setMocuState('speaking');
 
@@ -123,11 +278,6 @@ function App() {
     }
   };
 
-  /*
-   * Resize only the native Tauri window.
-   * Mocu remains inside a fixed-height area, so its position
-   * does not depend on the expanded window height.
-   */
   useEffect(() => {
     if (isSettingsWindow) {
       return;
@@ -241,6 +391,9 @@ function App() {
 
   useEffect(() => {
     return () => {
+      pipelineIdRef.current += 1;
+
+      abortActivePipeline();
       stopCurrentAudio();
 
       const mediaRecorder = mediaRecorderRef.current;
@@ -255,12 +408,20 @@ function App() {
       mediaRecorder?.stream
         .getTracks()
         .forEach((track) => track.stop());
+
+      mediaRecorderRef.current = null;
+      audioChunksRef.current = [];
     };
   }, []);
 
   const handleScheduleTrigger = async (
     ttsText: string,
   ) => {
+    const {
+      pipelineId,
+      signal,
+    } = createNewPipeline();
+
     stopCurrentAudio();
 
     setTranscriptSpeaker('mocu');
@@ -268,10 +429,22 @@ function App() {
     setMocuState('thinking');
 
     try {
-      await playSpeech(ttsText);
+      await playSpeech(
+        ttsText,
+        pipelineId,
+        signal,
+      );
     } catch (error) {
+      if (
+        pipelineId !== pipelineIdRef.current ||
+        signal.aborted ||
+        isAbortError(error)
+      ) {
+        return;
+      }
+
       console.error(
-        'Schedule Trigger TTS Error:',
+        'Schedule trigger TTS error:',
         error,
       );
 
@@ -308,6 +481,11 @@ function App() {
       return;
     }
 
+    const {
+      pipelineId,
+      signal,
+    } = createNewPipeline();
+
     stopCurrentAudio();
 
     try {
@@ -315,6 +493,17 @@ function App() {
         await navigator.mediaDevices.getUserMedia({
           audio: true,
         });
+
+      if (
+        pipelineId !== pipelineIdRef.current ||
+        signal.aborted
+      ) {
+        stream
+          .getTracks()
+          .forEach((track) => track.stop());
+
+        return;
+      }
 
       const supportedMimeTypes = [
         'audio/webm;codecs=opus',
@@ -350,7 +539,14 @@ function App() {
           .forEach((track) => track.stop());
 
         mediaRecorderRef.current = null;
-        setMocuState('idle');
+        audioChunksRef.current = [];
+
+        if (
+          pipelineId === pipelineIdRef.current &&
+          !signal.aborted
+        ) {
+          setMocuState('idle');
+        }
       };
 
       mediaRecorder.onstop = async () => {
@@ -359,6 +555,15 @@ function App() {
           .forEach((track) => track.stop());
 
         mediaRecorderRef.current = null;
+
+        if (
+          pipelineId !== pipelineIdRef.current ||
+          signal.aborted
+        ) {
+          audioChunksRef.current = [];
+          return;
+        }
+
         setMocuState('thinking');
 
         const recordedMimeType =
@@ -377,7 +582,17 @@ function App() {
 
         try {
           const transcribedText =
-            await transcribeAudio(audioBlob);
+            await transcribeAudio(
+              audioBlob,
+              signal,
+            );
+
+          if (
+            pipelineId !== pipelineIdRef.current ||
+            signal.aborted
+          ) {
+            return;
+          }
 
           const userText =
             typeof transcribedText === 'string'
@@ -394,8 +609,17 @@ function App() {
           setTranscriptSpeaker('user');
           setTranscriptText(userText);
 
-          const response =
-            await chatWithMocu(userText);
+          const response = await chatWithMocu(
+            userText,
+            signal,
+          );
+
+          if (
+            pipelineId !== pipelineIdRef.current ||
+            signal.aborted
+          ) {
+            return;
+          }
 
           let botResponseText =
             typeof response === 'string'
@@ -412,31 +636,57 @@ function App() {
           }
 
           console.log(
-            'Model Response:',
+            'Model response:',
             botResponseText,
           );
 
           setTranscriptSpeaker('mocu');
           setTranscriptText(botResponseText);
 
-          await playSpeech(botResponseText);
+          await playSpeech(
+            botResponseText,
+            pipelineId,
+            signal,
+          );
         } catch (error: unknown) {
+          if (
+            pipelineId !== pipelineIdRef.current ||
+            signal.aborted ||
+            isAbortError(error)
+          ) {
+            console.log('AI pipeline was cancelled.');
+            return;
+          }
+
           console.error(
-            'AI Pipeline Error:',
+            'AI pipeline error:',
             error,
           );
 
           setMocuState('idle');
         } finally {
-          setCurrentActivity(null);
+          if (
+            pipelineId === pipelineIdRef.current &&
+            !signal.aborted
+          ) {
+            setCurrentActivity(null);
+          }
         }
       };
 
       mediaRecorder.start();
       setMocuState('listening');
-    } catch (error) {
+    } catch (error: unknown) {
+      if (
+        pipelineId !== pipelineIdRef.current ||
+        signal.aborted ||
+        isAbortError(error)
+      ) {
+        return;
+      }
+
       console.error(
-        'Microphone access denied:',
+        'Microphone access failed:',
         error,
       );
 
@@ -450,10 +700,6 @@ function App() {
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-transparent select-none">
-      {/*
-       * This area always remains 320px high.
-       * Expanding the native window therefore adds space only below it.
-       */}
       <div
         className="absolute top-0 left-0 flex w-full items-center justify-center"
         style={{
@@ -463,6 +709,7 @@ function App() {
         <Mocu
           state={mocuState}
           onClick={handleToggleRecording}
+          onInterrupt={handleInterrupt}
           transcriptText={transcriptText}
           transcriptSpeaker={transcriptSpeaker}
           transcriptEnabled={true}

@@ -17,7 +17,19 @@ export type MocuState =
 
 interface MocuProps {
   state?: MocuState;
+
+  /*
+   * Normal click action.
+   * Usually starts/stops microphone recording.
+   */
   onClick?: () => void;
+
+  /*
+   * Triggered when the user clicks Mocu while it is processing
+   * a request or speaking. The parent can abort tools, requests,
+   * research pipelines, terminal processes, and audio playback.
+   */
+  onInterrupt?: () => void;
 
   /*
    * Optional static transcript support.
@@ -54,6 +66,7 @@ const CUBE_SIZE = 150;
 export const Mocu: React.FC<MocuProps> = ({
   state = 'idle',
   onClick,
+  onInterrupt,
   transcriptText = '',
   transcriptSpeaker = 'mocu',
   transcriptDelay = 800,
@@ -101,6 +114,28 @@ export const Mocu: React.FC<MocuProps> = ({
       }
     };
   }, []);
+
+  /*
+   * Normal behavior:
+   * - idle / happy / typing: invoke normal click action.
+   * - listening: invoke normal click action so parent can stop recording.
+   *
+   * Interrupt behavior:
+   * - thinking: cancel an active request, tool, research, or LLM call.
+   * - speaking: stop generated speech and cancel any active request.
+   */
+  const handleMocuClick = () => {
+    const isWorking =
+      state === 'thinking' ||
+      state === 'speaking';
+
+    if (isWorking) {
+      onInterrupt?.();
+      return;
+    }
+
+    onClick?.();
+  };
 
   const springConfig = {
     type: 'spring' as const,
@@ -266,97 +301,87 @@ export const Mocu: React.FC<MocuProps> = ({
       : 'default';
 
   return (
-  <div
-    className="relative w-full overflow-visible"
-    style={{
-      height: TOP_SPACE + CUBE_SIZE,
-    }}
-  >
-    {/*
-     * This wrapper has a fixed position and fixed size.
-     * The transcript is absolutely positioned, so it never changes
-     * Mocu's layout height and cannot push Mocu upward.
-     */}
     <div
-      className="absolute left-1/2 -translate-x-1/2"
+      className="relative w-full overflow-visible"
       style={{
-        top: TOP_SPACE,
-        width: CUBE_SIZE,
-        height: CUBE_SIZE,
+        height: TOP_SPACE + CUBE_SIZE,
       }}
     >
-      <StatusBubble state={state} />
-
       {/*
-       * Removed because the user does not want the large shadow below Mocu.
-       *
-       * <motion.div ... />
+       * This wrapper has a fixed position and fixed size.
+       * The transcript is absolutely positioned, so it never changes
+       * Mocu's layout height and cannot push Mocu upward.
        */}
-
-      <motion.div
-        onClick={onClick}
-        data-tauri-drag-region
-        className="absolute left-0 top-0 z-20 flex h-[150px] w-[150px] cursor-pointer items-center justify-center overflow-hidden rounded-[12px] bg-[#050505] transition-transform active:scale-95"
+      <div
+        className="absolute left-1/2 -translate-x-1/2"
         style={{
-          boxShadow: `
-            inset 0 2px 10px rgba(255, 255, 255, 0.15),
-            inset 0 -10px 20px rgba(0, 0, 0, 0.8),
-          `,
-          border: '1px solid rgba(255, 255, 255, 0.05)',
-        }}
-        animate={bodyVariants[bodyAnimation]}
-        whileHover={{
-          scale: 1.05,
-          rotate: -2,
-        }}
-        whileTap={{
-          scale: 0.95,
-          rotate: 0,
+          top: TOP_SPACE,
+          width: CUBE_SIZE,
+          height: CUBE_SIZE,
         }}
       >
-        <div className="pointer-events-none absolute left-3 top-0 h-[40px] w-[110px] rounded-b-[24px] rounded-t-[12px] bg-gradient-to-b from-white/10 to-transparent" />
+        <StatusBubble state={state} />
 
-        <div className="pointer-events-none z-30 flex translate-y-1 flex-col items-center gap-4">
-          <div className="flex w-full justify-center gap-6">
-            <motion.div
-              className="h-[20px] w-[18px] rounded-[4px] bg-white shadow-[0_0_12px_rgba(255,255,255,0.5)]"
-              animate={state}
-              variants={eyeVariants}
-              transition={springConfig}
-            />
+        <motion.div
+          onClick={handleMocuClick}
+          data-tauri-drag-region
+          className="absolute left-0 top-0 z-20 flex h-[150px] w-[150px] cursor-pointer items-center justify-center overflow-hidden rounded-[12px] bg-[#050505] transition-transform active:scale-95"
+          style={{
+            boxShadow: `
+              inset 0 2px 10px rgba(255, 255, 255, 0.15),
+              inset 0 -10px 20px rgba(0, 0, 0, 0.8)
+            `,
+            border: '1px solid rgba(255, 255, 255, 0.05)',
+          }}
+          animate={bodyVariants[bodyAnimation]}
+          whileHover={{
+            scale: 1.05,
+            rotate: -2,
+          }}
+          whileTap={{
+            scale: 0.95,
+            rotate: 0,
+          }}
+        >
+          <div className="pointer-events-none absolute left-3 top-0 h-[40px] w-[110px] rounded-b-[24px] rounded-t-[12px] bg-gradient-to-b from-white/10 to-transparent" />
+
+          <div className="pointer-events-none z-30 flex translate-y-1 flex-col items-center gap-4">
+            <div className="flex w-full justify-center gap-6">
+              <motion.div
+                className="h-[20px] w-[18px] rounded-[4px] bg-white shadow-[0_0_12px_rgba(255,255,255,0.5)]"
+                animate={state}
+                variants={eyeVariants}
+                transition={springConfig}
+              />
+
+              <motion.div
+                className="h-[20px] w-[18px] rounded-[4px] bg-white shadow-[0_0_12px_rgba(255,255,255,0.5)]"
+                animate={state}
+                variants={eyeVariants}
+                transition={springConfig}
+              />
+            </div>
 
             <motion.div
-              className="h-[20px] w-[18px] rounded-[4px] bg-white shadow-[0_0_12px_rgba(255,255,255,0.5)]"
+              className="bg-white shadow-[0_0_12px_rgba(255,255,255,0.5)]"
               animate={state}
-              variants={eyeVariants}
+              variants={mouthVariants}
               transition={springConfig}
             />
           </div>
+        </motion.div>
 
-          <motion.div
-            className="bg-white shadow-[0_0_12px_rgba(255,255,255,0.5)]"
-            animate={state}
-            variants={mouthVariants}
-            transition={springConfig}
+        <div className="absolute left-1/2 top-full z-40 mt-3 w-[230px] -translate-x-1/2">
+          <MocuTranscript
+            text={transcriptText}
+            speaker={transcriptSpeaker}
+            delay={transcriptDelay}
+            visibleFor={transcriptVisibleFor}
+            enabled={transcriptEnabled}
+            onHidden={onTranscriptHidden}
           />
         </div>
-      </motion.div>
-
-      {/*
-       * top-full means: start directly after the 150px Mocu cube.
-       * This is absolute, so it cannot affect the Mocu layout.
-       */}
-      <div className="absolute left-1/2 top-full z-40 mt-3 w-[230px] -translate-x-1/2">
-        <MocuTranscript
-          text={transcriptText}
-          speaker={transcriptSpeaker}
-          delay={transcriptDelay}
-          visibleFor={transcriptVisibleFor}
-          enabled={transcriptEnabled}
-          onHidden={onTranscriptHidden}
-        />
       </div>
     </div>
-  </div>
-);
+  );
 };
