@@ -18,6 +18,9 @@ import { chatWithMocu } from './services/ai/index';
 import { useScheduleTrigger } from './hooks/useScheduleTrigger';
 import { useMocuWindowSize } from './hooks/useMocuWindowSize';
 
+// test
+import {runTest} from './test'
+
 type ActivityEvent = {
   text: string;
   isRunning: boolean;
@@ -277,6 +280,29 @@ function App() {
       throw error;
     }
   };
+
+  const hasRunAtomicMemoryTestRef = useRef(false);
+  
+  useEffect(() => {
+  if (hasRunAtomicMemoryTestRef.current) {
+    return;
+  }
+
+  hasRunAtomicMemoryTestRef.current = true;
+
+  const executeTest = async () => {
+      try {
+        await runTest();
+      } catch (error) {
+        console.error(
+          '[Atomic memory test] Failed:',
+          error,
+        );
+      }
+    };
+
+    void executeTest();
+  }, []);
 
   useEffect(() => {
     if (isSettingsWindow) {

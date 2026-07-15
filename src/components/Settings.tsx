@@ -3,19 +3,27 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { readSettings, saveSettings } from "../store";
 
 export const Settings: React.FC = () => {
+  // Main LLM settings
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [llmModel, setLlmModel] = useState("");
+
+  // Speech settings
   const [sttModel, setSttModel] = useState("");
   const [ttsModel, setTtsModel] = useState("");
   const [ttsVoice, setTtsVoice] = useState("");
-  
-  // Vision settings states
+
+  // Embedding settings
+  const [embeddingApiKey, setEmbeddingApiKey] = useState("");
+  const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState("");
+  const [embeddingModel, setEmbeddingModel] = useState("");
+
+  // Vision settings
   const [visionApiKey, setVisionApiKey] = useState("");
   const [visionBaseUrl, setVisionBaseUrl] = useState("");
   const [visionModel, setVisionModel] = useState("");
 
-  // Perplexity settings states
+  // Perplexity settings
   const [perplexityApiKey, setPerplexityApiKey] = useState("");
   const [perplexityBaseUrl, setPerplexityBaseUrl] = useState("");
   const [perplexityModel, setPerplexityModel] = useState("");
@@ -33,25 +41,35 @@ export const Settings: React.FC = () => {
       try {
         const settings = await readSettings();
 
-        if (!isMounted) return;
+        if (!isMounted) {
+          return;
+        }
 
-        setApiKey(settings.apiKey || "");
-        setBaseUrl(settings.baseUrl || "");
-        setLlmModel(settings.llmModel || "");
-        setSttModel(settings.sttModel || "");
-        setTtsModel(settings.ttsModel || "");
-        setTtsVoice(settings.ttsVoice || "");
-        
-        // Load Vision settings
-        setVisionApiKey(settings.visionApiKey || "");
-        setVisionBaseUrl(settings.visionBaseUrl || "");
-        setVisionModel(settings.visionModel || "");
+        // Main LLM settings
+        setApiKey(settings.apiKey);
+        setBaseUrl(settings.baseUrl);
+        setLlmModel(settings.llmModel);
 
-        setPerplexityApiKey(settings.perplexityApiKey || "");
-        setPerplexityBaseUrl(settings.perplexityBaseUrl || "https://api.perplexity.ai");
-        setPerplexityModel(settings.perplexityModel || "sonar");
-        setSearchDepth(settings.searchDepth !== undefined ? settings.searchDepth : 3);
+        // Speech settings
+        setSttModel(settings.sttModel);
+        setTtsModel(settings.ttsModel);
+        setTtsVoice(settings.ttsVoice);
 
+        // Embedding settings
+        setEmbeddingApiKey(settings.embeddingApiKey);
+        setEmbeddingBaseUrl(settings.embeddingBaseUrl);
+        setEmbeddingModel(settings.embeddingModel);
+
+        // Vision settings
+        setVisionApiKey(settings.visionApiKey);
+        setVisionBaseUrl(settings.visionBaseUrl);
+        setVisionModel(settings.visionModel);
+
+        // Perplexity settings
+        setPerplexityApiKey(settings.perplexityApiKey);
+        setPerplexityBaseUrl(settings.perplexityBaseUrl);
+        setPerplexityModel(settings.perplexityModel);
+        setSearchDepth(settings.searchDepth);
       } catch (error) {
         console.error("Failed to load settings:", error);
       } finally {
@@ -61,7 +79,7 @@ export const Settings: React.FC = () => {
       }
     };
 
-    loadSettings();
+    void loadSettings();
 
     return () => {
       isMounted = false;
@@ -69,28 +87,41 @@ export const Settings: React.FC = () => {
   }, []);
 
   const handleSave = async () => {
-    if (isSaving) return;
+    if (isSaving) {
+      return;
+    }
+
     setIsSaving(true);
 
     try {
-      const settings = {
+      await saveSettings({
+        // Main LLM settings
         apiKey,
         baseUrl,
         llmModel,
+
+        // Speech settings
         sttModel,
         ttsModel,
         ttsVoice,
+
+        // Embedding settings
+        embeddingApiKey,
+        embeddingBaseUrl,
+        embeddingModel,
+
         // Vision settings
         visionApiKey,
         visionBaseUrl,
         visionModel,
+
+        // Perplexity settings
         perplexityApiKey,
         perplexityBaseUrl,
         perplexityModel,
-        searchDepth: Number(searchDepth),
-      };
+        searchDepth,
+      });
 
-      await saveSettings(settings);
       await appWindow.close();
     } catch (error) {
       console.error("Failed to save settings:", error);
@@ -99,25 +130,42 @@ export const Settings: React.FC = () => {
   };
 
   const handleCancel = async () => {
+    if (isSaving) {
+      return;
+    }
+
     await appWindow.close();
   };
 
   if (isLoading) {
     return (
       <div className="w-full h-screen flex items-center justify-center bg-[#070707] text-white select-none">
-        <span className="text-xs text-white/40 tracking-wider animate-pulse">Loading settings...</span>
+        <span className="text-xs text-white/40 tracking-wider animate-pulse">
+          Loading settings...
+        </span>
       </div>
     );
   }
 
+  const inputClassName =
+    "w-full bg-[#111111] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50";
+
+  const cardInputClassName =
+    "w-full bg-[#141414] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50";
+
+  const labelClassName =
+    "text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-1";
+
+  const cardLabelClassName =
+    "text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-0.5";
+
   return (
     <div className="w-full h-screen flex flex-col justify-between p-6 bg-[#070707] text-white select-none font-sans">
-      
-      {/* Inline styles to hide scrollbars globally in this window */}
       <style>{`
         .no-scrollbar::-webkit-scrollbar {
           display: none;
         }
+
         .no-scrollbar {
           -ms-overflow-style: none;
           scrollbar-width: none;
@@ -131,95 +179,131 @@ export const Settings: React.FC = () => {
         </h3>
       </div>
 
-      {/* Scrollable form container without visible scrollbar */}
+      {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto no-scrollbar my-4 pr-0.5 flex flex-col gap-5 max-h-[calc(100vh-140px)]">
-        
-        {/* Section 1: General AI Settings */}
+        {/* Main AI Settings */}
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-1">
-              API Key
-            </label>
+            <label className={labelClassName}>API Key</label>
             <input
               type="password"
               value={apiKey}
               disabled={isSaving}
               onChange={(event) => setApiKey(event.target.value)}
-              placeholder="Enter your LLM API Key"
-              className="w-full bg-[#111111] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              placeholder="Enter your LLM API key"
+              className={inputClassName}
             />
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-1">
-              Base URL
-            </label>
+            <label className={labelClassName}>Base URL</label>
             <input
               type="text"
               value={baseUrl}
               disabled={isSaving}
               onChange={(event) => setBaseUrl(event.target.value)}
               placeholder="https://api.openai.com/v1"
-              className="w-full bg-[#111111] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              className={inputClassName}
             />
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-1">
-              LLM Model
-            </label>
+            <label className={labelClassName}>LLM Model</label>
             <input
               type="text"
               value={llmModel}
               disabled={isSaving}
               onChange={(event) => setLlmModel(event.target.value)}
-              className="w-full bg-[#111111] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              placeholder="Your chat model name"
+              className={inputClassName}
             />
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-1">
-              STT Model
-            </label>
+            <label className={labelClassName}>STT Model</label>
             <input
               type="text"
               value={sttModel}
               disabled={isSaving}
               onChange={(event) => setSttModel(event.target.value)}
-              className="w-full bg-[#111111] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              placeholder="Your speech-to-text model name"
+              className={inputClassName}
             />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-1">
-                TTS Model
-              </label>
+              <label className={labelClassName}>TTS Model</label>
               <input
                 type="text"
                 value={ttsModel}
                 disabled={isSaving}
                 onChange={(event) => setTtsModel(event.target.value)}
-                className="w-full bg-[#111111] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+                placeholder="TTS model"
+                className={inputClassName}
               />
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-1">
-                TTS Voice
-              </label>
+              <label className={labelClassName}>TTS Voice</label>
               <input
                 type="text"
                 value={ttsVoice}
                 disabled={isSaving}
                 onChange={(event) => setTtsVoice(event.target.value)}
-                className="w-full bg-[#111111] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+                placeholder="Voice name"
+                className={inputClassName}
               />
             </div>
           </div>
         </div>
 
-        {/* Section: Vision Model Settings */}
+        {/* Embedding Settings */}
+        <div className="bg-[#0c0c0c] border border-white/5 p-4 rounded-xl flex flex-col gap-4 mt-2">
+          <div className="border-b border-white/5 pb-2">
+            <h4 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">
+              Embedding Model
+            </h4>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className={cardLabelClassName}>API Key</label>
+            <input
+              type="password"
+              value={embeddingApiKey}
+              disabled={isSaving}
+              onChange={(event) => setEmbeddingApiKey(event.target.value)}
+              placeholder="Leave empty if your provider does not require a key"
+              className={cardInputClassName}
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className={cardLabelClassName}>Base URL</label>
+            <input
+              type="text"
+              value={embeddingBaseUrl}
+              disabled={isSaving}
+              onChange={(event) => setEmbeddingBaseUrl(event.target.value)}
+              placeholder="https://api.openai.com/v1"
+              className={cardInputClassName}
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className={cardLabelClassName}>Model Name</label>
+            <input
+              type="text"
+              value={embeddingModel}
+              disabled={isSaving}
+              onChange={(event) => setEmbeddingModel(event.target.value)}
+              placeholder="Embedding model name"
+              className={cardInputClassName}
+            />
+          </div>
+        </div>
+
+        {/* Vision Settings */}
         <div className="bg-[#0c0c0c] border border-white/5 p-4 rounded-xl flex flex-col gap-4 mt-2">
           <div className="border-b border-white/5 pb-2">
             <h4 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">
@@ -228,49 +312,43 @@ export const Settings: React.FC = () => {
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-0.5">
-              API Key
-            </label>
+            <label className={cardLabelClassName}>API Key</label>
             <input
               type="password"
               value={visionApiKey}
               disabled={isSaving}
               onChange={(event) => setVisionApiKey(event.target.value)}
-              placeholder="Enter Vision Model API Key"
-              className="w-full bg-[#141414] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              placeholder="Enter Vision API key"
+              className={cardInputClassName}
             />
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-0.5">
-              Base URL
-            </label>
+            <label className={cardLabelClassName}>Base URL</label>
             <input
               type="text"
               value={visionBaseUrl}
               disabled={isSaving}
               onChange={(event) => setVisionBaseUrl(event.target.value)}
               placeholder="https://api.openai.com/v1"
-              className="w-full bg-[#141414] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              className={cardInputClassName}
             />
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-0.5">
-              Model Name
-            </label>
+            <label className={cardLabelClassName}>Model Name</label>
             <input
               type="text"
               value={visionModel}
               disabled={isSaving}
               onChange={(event) => setVisionModel(event.target.value)}
-              placeholder="gpt-4o-mini"
-              className="w-full bg-[#141414] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              placeholder="Vision model name"
+              className={cardInputClassName}
             />
           </div>
         </div>
 
-        {/* Section 2: Perplexity (Research Engine) Card */}
+        {/* Perplexity Settings */}
         <div className="bg-[#0c0c0c] border border-white/5 p-4 rounded-xl flex flex-col gap-4 mt-2">
           <div className="border-b border-white/5 pb-2">
             <h4 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">
@@ -279,66 +357,62 @@ export const Settings: React.FC = () => {
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-0.5">
-              API Key
-            </label>
+            <label className={cardLabelClassName}>API Key</label>
             <input
               type="password"
               value={perplexityApiKey}
               disabled={isSaving}
               onChange={(event) => setPerplexityApiKey(event.target.value)}
-              placeholder="Enter Perplexity API Key"
-              className="w-full bg-[#141414] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              placeholder="Enter Perplexity API key"
+              className={cardInputClassName}
             />
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-0.5">
-              Base URL
-            </label>
+            <label className={cardLabelClassName}>Base URL</label>
             <input
               type="text"
               value={perplexityBaseUrl}
               disabled={isSaving}
               onChange={(event) => setPerplexityBaseUrl(event.target.value)}
-              className="w-full bg-[#141414] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+              placeholder="https://api.perplexity.ai"
+              className={cardInputClassName}
             />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-0.5">
-                Model
-              </label>
+              <label className={cardLabelClassName}>Model</label>
               <input
                 type="text"
                 value={perplexityModel}
                 disabled={isSaving}
                 onChange={(event) => setPerplexityModel(event.target.value)}
-                className="w-full bg-[#141414] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+                placeholder="sonar"
+                className={cardInputClassName}
               />
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] text-white/30 font-semibold uppercase tracking-wider pl-0.5">
-                Search Depth
-              </label>
+              <label className={cardLabelClassName}>Search Depth</label>
               <input
                 type="number"
                 min="1"
                 max="10"
                 value={searchDepth}
                 disabled={isSaving}
-                onChange={(event) => setSearchDepth(Number(event.target.value))}
-                className="w-full bg-[#141414] border border-white/5 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/5 transition-all disabled:opacity-50"
+                onChange={(event) => {
+                  const nextValue = Number(event.target.value);
+                  setSearchDepth(Number.isFinite(nextValue) ? nextValue : 3);
+                }}
+                className={cardInputClassName}
               />
             </div>
           </div>
         </div>
-
       </div>
 
-      {/* Action Buttons */}
+      {/* Action buttons */}
       <div className="flex gap-3 pt-4 border-t border-white/5">
         <button
           type="button"
