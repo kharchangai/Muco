@@ -1,6 +1,10 @@
 import { z } from "zod";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { getAsyncLLM } from "../memory_tools";
+import {
+  HumanMessage,
+  SystemMessage,
+} from "@langchain/core/messages";
+
+import { getAsyncLLM } from "../../llm";
 import { ATOMIC_MEMORY_EXTRACTION_PROMPT } from "./prompts";
 
 export const AtomicMemorySchema = z.object({
@@ -11,7 +15,9 @@ export const AtomicMemoryExtractionSchema = z.object({
   memories: z.array(AtomicMemorySchema),
 });
 
-export type AtomicMemory = z.infer<typeof AtomicMemorySchema>;
+export type AtomicMemory = z.infer<
+  typeof AtomicMemorySchema
+>;
 
 /**
  * Raw JSON Schema for the provider.
@@ -41,16 +47,52 @@ const AtomicMemoryExtractionJsonSchema = {
   required: ["memories"],
 } as const;
 
+const createAbortError = (): DOMException => {
+  return new DOMException(
+    "The operation was cancelled.",
+    "AbortError",
+  );
+};
+
+const throwIfAborted = (
+  signal?: AbortSignal,
+): void => {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+};
+
+const isAbortError = (
+  error: unknown,
+): boolean => {
+  return (
+    error instanceof DOMException &&
+    error.name === "AbortError"
+  ) || (
+    error instanceof Error &&
+    error.name === "AbortError"
+  );
+};
+
 /**
  * Extracts independent atomic memory candidates from a raw user message.
+ *
+ * Cancellation behavior:
+ * - Throws AbortError when the signal is aborted.
+ * - Passes the signal to the structured LLM invocation.
+ * - Does not convert cancellation into an empty array, because the caller
+ *   must stop the complete memory pipeline immediately.
  *
  * This function only extracts standalone memory statements.
  * It does not create IDs, keys, tags, contexts, embeddings, links,
  * timestamps, files, or database records.
  */
 export async function extractAtomicMemories(
-  userText: string
+  userText: string,
+  signal?: AbortSignal,
 ): Promise<AtomicMemory[]> {
+  throwIfAborted(signal);
+
   const text = userText?.trim();
 
   if (!text) {
@@ -58,26 +100,38 @@ export async function extractAtomicMemories(
   }
 
   try {
-    const model = await getAsyncLLM();
+    const model = await getAsyncLLM("cheap");
+
+    throwIfAborted(signal);
 
     const structuredModel = model.withStructuredOutput(
       AtomicMemoryExtractionJsonSchema,
       {
         name: "atomic_memory_extraction",
-      }
+      },
     );
 
-    const result = await structuredModel.invoke([
-      new SystemMessage(ATOMIC_MEMORY_EXTRACTION_PROMPT),
-      new HumanMessage(text),
-    ]);
+    const result = await structuredModel.invoke(
+      [
+        new SystemMessage(
+          ATOMIC_MEMORY_EXTRACTION_PROMPT,
+        ),
+        new HumanMessage(text),
+      ],
+      {
+        signal,
+      },
+    );
 
-    const validatedResult = AtomicMemoryExtractionSchema.safeParse(result);
+    throwIfAborted(signal);
+
+    const validatedResult =
+      AtomicMemoryExtractionSchema.safeParse(result);
 
     if (!validatedResult.success) {
       console.error(
         "[Atomic memory extraction] Invalid structured response:",
-        validatedResult.error
+        validatedResult.error,
       );
 
       return [];
@@ -85,7 +139,20 @@ export async function extractAtomicMemories(
 
     return validatedResult.data.memories;
   } catch (error) {
-    console.error("[Atomic memory extraction] Failed:", error);
+    /*
+     * Cancellation must be propagated to processUserMessage.
+     * Returning [] here would make the upper layer think extraction
+     * completed normally and may allow later work to continue.
+     */
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    console.error(
+      "[Atomic memory extraction] Failed:",
+      error,
+    );
+
     return [];
   }
 }

@@ -18,11 +18,15 @@ import { evolveNeighborContext } from "./evolveNeighborContext";
 
 const MEMORY_DIRECTORY = "memory";
 
+const MEMORY_RELATIONSHIPS = [
+  "COMPLEMENTS",
+  "CONTRADICTS",
+  "RELATED",
+  "DUPLICATE",
+] as const;
+
 export type MemoryRelationship =
-  | "COMPLEMENTS"
-  | "CONTRADICTS"
-  | "RELATED"
-  | "DUPLICATE";
+  (typeof MEMORY_RELATIONSHIPS)[number];
 
 export type MemoryLink = {
   targetId: string;
@@ -45,50 +49,125 @@ export type CreatedMemoryResult = {
   filePath: string;
 };
 
+const createAbortError = (): DOMException => {
+  return new DOMException(
+    "The operation was cancelled.",
+    "AbortError",
+  );
+};
+
+const throwIfAborted = (
+  signal?: AbortSignal,
+): void => {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+};
+
 /**
  * Creates and stores one complete memory file from an atomic memory text.
+ *
+ * Cancellation behavior:
+ * - Checks cancellation before and after every pipeline stage.
+ * - Passes the signal to all downstream functions.
+ * - Throws AbortError when cancelled.
+ * - Does not save the new memory when cancellation happens before saving.
  *
  * Pipeline:
  * 1. Enrich the atomic memory.
  * 2. Find similar stored memories.
- * 3. Analyze the relationship with every similar memory.
- * 4. Create links from useful relationships.
- * 5. Evolve or delete neighboring memories when required.
- * 6. Remove duplicate links from the new memory.
- * 7. Save the final memory as a JSON file.
+ * 3. Analyze relationships with similar memories.
+ * 4. Create links from valid relationship analyses.
+ * 5. Evolve neighboring memories when required.
+ * 6. Replace links with the final evolved links.
+ * 7. Save the final memory JSON file.
+ *
+ * Important:
+ * Tauri file operations cannot necessarily be interrupted after they begin.
+ * Cancellation checks ensure that no next stage starts after cancellation.
  */
 export async function createMemory(
   atomicMemory: string,
+  signal?: AbortSignal,
 ): Promise<CreatedMemoryResult> {
-  if (!atomicMemory.trim()) {
+  throwIfAborted(signal);
+
+  const content = atomicMemory?.trim();
+
+  if (!content) {
     throw new Error("Atomic memory content cannot be empty.");
   }
 
-  const enrichedMemory = await enrichAtomicMemory(atomicMemory);
-
-  const similarMemories = await findSimilarMemories(enrichedMemory);
-
-  const relationshipAnalyses = await analyzeMemoryRelationships(
-    enrichedMemory,
-    similarMemories,
+  /*
+   * enrichAtomicMemory must accept:
+   * (atomicMemory: string, signal?: AbortSignal)
+   */
+  const enrichedMemory = await enrichAtomicMemory(
+    content,
+    signal,
   );
 
-  const links = createMemoryLinks(relationshipAnalyses);
+  throwIfAborted(signal);
+
+  /*
+   * findSimilarMemories must accept:
+   * (memory: MemoryNode, signal?: AbortSignal)
+   */
+  const similarMemories = await findSimilarMemories(
+    enrichedMemory,
+    signal,
+  );
+
+  throwIfAborted(signal);
+
+  /*
+   * analyzeMemoryRelationships must accept:
+   * (
+   *   sourceMemory: MemoryNode,
+   *   similarMemories: SimilarMemory[],
+   *   signal?: AbortSignal,
+   * )
+   */
+  const relationshipAnalyses =
+    await analyzeMemoryRelationships(
+      enrichedMemory,
+      similarMemories,
+      signal,
+    );
+
+  throwIfAborted(signal);
+
+  const links = createMemoryLinks(
+    relationshipAnalyses,
+  );
 
   const memoryToSave: MemoryNodeWithLinks = {
     ...enrichedMemory,
     links,
   };
 
-  /*
-   * Wait for neighbor processing to finish.
-   *
-   * The returned list does not contain DUPLICATE links, so it must replace
-   * the original links before the new memory is written to disk.
-   */
-  memoryToSave.links = await evolveNeighborContext(memoryToSave);
+  throwIfAborted(signal);
 
-  const filePath = await saveMemoryFile(memoryToSave);
+  /*
+   * evolveNeighborContext must accept:
+   * (memoryToSave: MemoryNodeWithLinks, signal?: AbortSignal)
+   *
+   * This operation can update or delete neighbor files. It is important that
+   * evolveNeighborContext checks signal before each write/remove operation.
+   */
+  memoryToSave.links = await evolveNeighborContext(
+    memoryToSave,
+    signal,
+  );
+
+  throwIfAborted(signal);
+
+  const filePath = await saveMemoryFile(
+    memoryToSave,
+    signal,
+  );
+
+  throwIfAborted(signal);
 
   return {
     memory: memoryToSave,
@@ -101,7 +180,8 @@ export async function createMemory(
 /**
  * Converts useful relationship analyses to links stored on the new memory.
  *
- * UNRELATED memories and low-confidence relationships are excluded.
+ * UNRELATED memories, invalid targets, invalid confidence values, and
+ * low-confidence relationships are excluded.
  */
 function createMemoryLinks(
   relationshipAnalyses: MemoryRelationshipAnalysis[],
@@ -115,16 +195,19 @@ function createMemoryLinks(
       similarity,
       analysis,
     }): MemoryLink[] => {
+      const confidence = Number(analysis.confidence);
+
       if (
         !isMemoryRelationship(analysis.relationship) ||
-        analysis.confidence < 0.5
+        !Number.isFinite(confidence) ||
+        confidence < 0.5
       ) {
         return [];
       }
 
       if (!targetMemoryId?.trim() || !targetFileName?.trim()) {
         console.warn(
-          "A memory relationship was ignored because its target is invalid.",
+          "[Memory creation] A relationship was ignored because its target is invalid.",
         );
 
         return [];
@@ -132,12 +215,14 @@ function createMemoryLinks(
 
       return [
         {
-          targetId: targetMemoryId,
-          targetFileName,
+          targetId: targetMemoryId.trim(),
+          targetFileName: targetFileName.trim(),
           relationship: analysis.relationship,
-          similarity,
-          confidence: analysis.confidence,
-          reason: analysis.reason,
+          similarity: Number.isFinite(similarity)
+            ? similarity
+            : 0,
+          confidence,
+          reason: analysis.reason?.trim() || "",
           createdAt,
         },
       ];
@@ -151,38 +236,62 @@ function createMemoryLinks(
 function isMemoryRelationship(
   relationship: string,
 ): relationship is MemoryRelationship {
-  return (
-    relationship === "COMPLEMENTS" ||
-    relationship === "CONTRADICTS" ||
-    relationship === "RELATED" ||
-    relationship === "DUPLICATE"
+  return MEMORY_RELATIONSHIPS.includes(
+    relationship as MemoryRelationship,
   );
 }
 
 /**
  * Saves a memory as memory/{memory.id}.json inside AppData.
+ *
+ * The signal cannot force-stop an already-running Tauri write operation,
+ * but cancellation is checked before and after the write.
  */
 async function saveMemoryFile(
   memory: MemoryNodeWithLinks,
+  signal?: AbortSignal,
 ): Promise<string> {
+  throwIfAborted(signal);
+
   if (!memory.id?.trim()) {
     throw new Error(
       "Memory cannot be saved because it has no valid id.",
     );
   }
 
-  await ensureMemoryDirectoryExists();
+  await ensureMemoryDirectoryExists(signal);
 
-  const fileName = `${memory.id}.json`;
+  throwIfAborted(signal);
+
+  /*
+   * IDs are generated internally. This check prevents accidental path
+   * traversal if an invalid ID ever reaches this layer.
+   */
+  const fileId = sanitizeMemoryId(memory.id);
+  const fileName = `${fileId}.json`;
   const filePath = `${MEMORY_DIRECTORY}/${fileName}`;
 
-  await writeTextFile(
-    filePath,
-    JSON.stringify(memory, null, 2),
-    {
-      baseDir: BaseDirectory.AppData,
-    },
-  );
+  try {
+    await writeTextFile(
+      filePath,
+      JSON.stringify(memory, null, 2),
+      {
+        baseDir: BaseDirectory.AppData,
+      },
+    );
+  } catch (error) {
+    console.error(
+      "[Memory creation] Failed to save memory file:",
+      filePath,
+      error,
+    );
+
+    throw new Error(
+      `Failed to save memory "${fileId}": ${getErrorMessage(error)}`,
+    );
+  }
+
+  throwIfAborted(signal);
 
   return filePath;
 }
@@ -190,13 +299,19 @@ async function saveMemoryFile(
 /**
  * Creates the memory directory when it does not already exist.
  */
-async function ensureMemoryDirectoryExists(): Promise<void> {
+async function ensureMemoryDirectoryExists(
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal);
+
   const memoryDirectoryExists = await exists(
     MEMORY_DIRECTORY,
     {
       baseDir: BaseDirectory.AppData,
     },
   );
+
+  throwIfAborted(signal);
 
   if (memoryDirectoryExists) {
     return;
@@ -206,4 +321,31 @@ async function ensureMemoryDirectoryExists(): Promise<void> {
     baseDir: BaseDirectory.AppData,
     recursive: true,
   });
+
+  throwIfAborted(signal);
+}
+
+/**
+ * Converts an ID into a safe filename fragment.
+ */
+function sanitizeMemoryId(id: string): string {
+  const sanitizedId = id
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  if (!sanitizedId) {
+    throw new Error(
+      "Memory cannot be saved because its id is invalid.",
+    );
+  }
+
+  return sanitizedId;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
 }

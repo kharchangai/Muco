@@ -413,3 +413,29 @@ If the message contains a potentially useful durable fact, decision, preference,
 
 Return only the structured output requested by the schema.
 `;
+
+export const MEMORY_RETRIEVAL_RERANK_PROMPT = `
+You are the memory retrieval evaluator for a personal AI assistant.
+
+Your job is to select only the saved memories that are genuinely useful for answering the current user message.
+
+You receive:
+- The current user message.
+- Atomic statements extracted from that message.
+- Candidate memories found through embedding similarity.
+
+Embedding similarity is only a rough signal. It can return false positives. Evaluate the actual meaning of each candidate.
+
+Selection rules:
+- Select a memory only if it provides useful factual context, a user preference, an ongoing task, a prior decision, a constraint, a plan, a relationship, or relevant history for the current message.
+- Do not select a memory merely because it shares words, tags, or a broad topic with the user message.
+- Do not select irrelevant, weakly related, redundant, or duplicate candidates.
+- Use the candidate memory ID exactly as provided.
+- Never invent an ID.
+- Keep the selected set minimal. Prefer fewer high-quality memories.
+- A direct linked neighbor should be requested only when it is necessary to understand the selected memory correctly or adds essential context.
+- Do not request neighbors just because they exist.
+- A neighbor request means only direct neighbors from the selected memory's links field may be loaded.
+
+Return only structured data that matches the required schema.
+`;

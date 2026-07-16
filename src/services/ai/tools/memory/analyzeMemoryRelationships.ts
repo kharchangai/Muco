@@ -1,7 +1,7 @@
 import { z } from "zod";
 
+import { getAsyncLLM } from "../../llm";
 import { MEMORY_RELATIONSHIP_ANALYSIS_PROMPT } from "./prompts";
-import { getAsyncLLM } from "../memory_tools";
 
 import type { MemoryNode } from "./enrichMemory";
 import type { SimilarMemoryResult } from "./findSimilarMemories";
@@ -17,7 +17,13 @@ const relationshipSchema = z.object({
   confidence: z.number().min(0).max(1),
   reason: z.string().min(1),
   affectedFields: z.array(
-    z.enum(["content", "context", "key", "tags", "links"]),
+    z.enum([
+      "content",
+      "context",
+      "key",
+      "tags",
+      "links",
+    ]),
   ),
   suggestedAction: z.enum([
     "KEEP_SEPARATE",
@@ -27,7 +33,9 @@ const relationshipSchema = z.object({
   ]),
 });
 
-export type MemoryRelationship = z.infer<typeof relationshipSchema>;
+export type MemoryRelationship = z.infer<
+  typeof relationshipSchema
+>;
 
 export type MemoryRelationshipAnalysis = {
   targetFileName: string;
@@ -36,25 +44,58 @@ export type MemoryRelationshipAnalysis = {
   analysis: MemoryRelationship;
 };
 
+const createAbortError = (): DOMException => {
+  return new DOMException(
+    "The operation was cancelled.",
+    "AbortError",
+  );
+};
+
+const throwIfAborted = (
+  signal?: AbortSignal,
+): void => {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+};
+
 /**
  * Analyzes how a new memory affects every similar stored memory.
  *
  * One independent LLM request is sent for each similar memory.
  * This function only analyzes relationships and does not modify files.
+ *
+ * If the signal is aborted, AbortError is thrown and must be allowed
+ * to propagate to the caller. Do not convert it into an empty array.
  */
 export async function analyzeMemoryRelationships(
   newMemory: MemoryNode,
   similarMemories: SimilarMemoryResult[],
+  signal?: AbortSignal,
 ): Promise<MemoryRelationshipAnalysis[]> {
+  throwIfAborted(signal);
+
   if (similarMemories.length === 0) {
     return [];
   }
 
+  /*
+   * Promise.all starts all relationship analyses concurrently.
+   * Every individual invoke receives the same AbortSignal. Therefore,
+   * calling controller.abort() cancels all provider requests that support
+   * abort signals.
+   */
   const analyses = await Promise.all(
     similarMemories.map((similarMemory) =>
-      analyzeSingleMemoryRelationship(newMemory, similarMemory),
+      analyzeSingleMemoryRelationship(
+        newMemory,
+        similarMemory,
+        signal,
+      ),
     ),
   );
+
+  throwIfAborted(signal);
 
   return analyses;
 }
@@ -62,19 +103,51 @@ export async function analyzeMemoryRelationships(
 async function analyzeSingleMemoryRelationship(
   newMemory: MemoryNode,
   similarMemory: SimilarMemoryResult,
+  signal?: AbortSignal,
 ): Promise<MemoryRelationshipAnalysis> {
-  const llm = await getAsyncLLM();
+  throwIfAborted(signal);
+
+  const llm = await getAsyncLLM("cheap");
+
+  throwIfAborted(signal);
 
   const prompt = MEMORY_RELATIONSHIP_ANALYSIS_PROMPT
-    .replace("{newMemory}", JSON.stringify(toComparableMemory(newMemory), null, 2))
+    .replace(
+      "{newMemory}",
+      JSON.stringify(
+        toComparableMemory(newMemory),
+        null,
+        2,
+      ),
+    )
     .replace(
       "{targetMemory}",
-      JSON.stringify(toComparableMemory(similarMemory.memory), null, 2),
+      JSON.stringify(
+        toComparableMemory(similarMemory.memory),
+        null,
+        2,
+      ),
     );
 
-  const structuredLlm = llm.withStructuredOutput(relationshipSchema);
+  throwIfAborted(signal);
 
-  const analysis = await structuredLlm.invoke(prompt);
+  const structuredLlm = llm.withStructuredOutput(
+    relationshipSchema,
+  );
+
+  /*
+   * LangChain passes the signal to the model/provider invocation.
+   * OpenAI-compatible providers that support AbortSignal will terminate the
+   * underlying HTTP request after controller.abort().
+   */
+  const analysis = await structuredLlm.invoke(
+    prompt,
+    {
+      signal,
+    },
+  );
+
+  throwIfAborted(signal);
 
   return {
     targetFileName: similarMemory.fileName,

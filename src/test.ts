@@ -1,13 +1,8 @@
-import { processUserMessage } from "./services/ai/tools/memory/processUserMessage";
+import {initializeShortMemory} from "./services/ai/tools/memory/short-memory/initializeShortMemory"
 
 export async function runTest() {
   try {
-    const test = await processUserMessage(
-      "سلام چطوری مکو؟",
-    );
-
-    console.log("--------------test----------------");
-    console.log(test);
+    initializeShortMemory()
   } catch (error) {
     console.error("Test failed:", error);
   }

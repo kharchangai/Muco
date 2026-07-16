@@ -8,6 +8,13 @@ import {
   readSettings,
 } from "../store";
 
+export type LlmTier = "cheap" | "medium" | "expensive";
+
+type LlmConfig = {
+  baseUrl: string;
+  model: string;
+};
+
 const MAX_HISTORY_MESSAGES = 12;
 
 const getApiConfig = async (): Promise<AppSettings> => {
@@ -15,8 +22,16 @@ const getApiConfig = async (): Promise<AppSettings> => {
 
   console.log("AI config:", {
     apiKey: config.apiKey ? "set" : "missing",
-    baseUrl: config.baseUrl || "missing",
-    llmModel: config.llmModel || "missing",
+
+    cheapBaseUrl: config.cheapBaseUrl || "missing",
+    cheapModel: config.cheapModel || "missing",
+
+    mediumBaseUrl: config.mediumBaseUrl || "missing",
+    mediumModel: config.mediumModel || "missing",
+
+    expensiveBaseUrl: config.expensiveBaseUrl || "missing",
+    expensiveModel: config.expensiveModel || "missing",
+
     sttModel: config.sttModel || "missing",
     ttsModel: config.ttsModel || "missing",
     ttsVoice: config.ttsVoice || "missing",
@@ -27,22 +42,6 @@ const getApiConfig = async (): Promise<AppSettings> => {
 
 const normalizeBaseUrl = (baseUrl: string): string => {
   return baseUrl.trim().replace(/\/+$/, "");
-};
-
-const validateBaseConfig = (
-  config: AppSettings,
-): void => {
-  if (!config.apiKey || config.apiKey.trim().length === 0) {
-    throw new Error(
-      "API Key is missing. Please configure it in Settings.",
-    );
-  }
-
-  if (!config.baseUrl || config.baseUrl.trim().length === 0) {
-    throw new Error(
-      "Base URL is missing. Please configure it in Settings.",
-    );
-  }
 };
 
 const throwIfAborted = (
@@ -70,27 +69,112 @@ export const isAbortError = (
   return false;
 };
 
-const getChatModel = async (): Promise<ChatOpenAI> => {
-  const config = await getApiConfig();
-
-  validateBaseConfig(config);
-
-  if (!config.llmModel || config.llmModel.trim().length === 0) {
+const validateApiKey = (
+  config: AppSettings,
+): void => {
+  if (!config.apiKey || config.apiKey.trim().length === 0) {
     throw new Error(
-      "LLM Model is missing. Please configure it in Settings.",
+      "API Key is missing. Please configure it in Settings.",
+    );
+  }
+};
+
+const getLlmConfig = (
+  tier: LlmTier,
+  config: AppSettings,
+): LlmConfig => {
+  switch (tier) {
+    case "cheap":
+      return {
+        baseUrl: config.cheapBaseUrl || "",
+        model: config.cheapModel || "",
+      };
+
+    case "medium":
+      return {
+        baseUrl: config.mediumBaseUrl || "",
+        model: config.mediumModel || "",
+      };
+
+    case "expensive":
+      return {
+        baseUrl: config.expensiveBaseUrl || "",
+        model: config.expensiveModel || "",
+      };
+  }
+};
+
+const validateLlmConfig = (
+  tier: LlmTier,
+  llmConfig: LlmConfig,
+): void => {
+  if (!llmConfig.baseUrl || llmConfig.baseUrl.trim().length === 0) {
+    throw new Error(
+      `${tier} LLM Base URL is missing. Please configure it in Settings.`,
     );
   }
 
+  if (!llmConfig.model || llmConfig.model.trim().length === 0) {
+    throw new Error(
+      `${tier} LLM Model is missing. Please configure it in Settings.`,
+    );
+  }
+};
+
+export const getAsyncLLM = async (
+  tier: LlmTier = "medium",
+): Promise<ChatOpenAI> => {
+  const config = await getApiConfig();
+
+  validateApiKey(config);
+
+  const llmConfig = getLlmConfig(tier, config);
+
+  validateLlmConfig(tier, llmConfig);
+
   return new ChatOpenAI({
-    apiKey: config.apiKey,
-    model: config.llmModel,
+    apiKey: config.apiKey.trim(),
+    model: llmConfig.model.trim(),
     configuration: {
-      baseURL: normalizeBaseUrl(config.baseUrl),
+      baseURL: normalizeBaseUrl(llmConfig.baseUrl),
     },
+    dangerouslyAllowBrowser: true,
   });
 };
 
 let messageHistory: BaseMessage[] = [];
+
+const getResponseText = (
+  content: unknown,
+): string => {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+
+      if (
+        typeof part === "object" &&
+        part !== null &&
+        "text" in part &&
+        typeof part.text === "string"
+      ) {
+        return part.text;
+      }
+
+      return "";
+    })
+    .join("")
+    .trim();
+};
 
 export async function transcribeAudio(
   audioBlob: Blob,
@@ -101,27 +185,32 @@ export async function transcribeAudio(
   const config = await getApiConfig();
 
   throwIfAborted(signal);
-  validateBaseConfig(config);
+  validateApiKey(config);
 
-  if (!config.sttModel || config.sttModel.trim().length === 0) {
+  if (!config.expensiveBaseUrl?.trim()) {
+    throw new Error(
+      "Speech Base URL is missing. Configure the Expensive LLM Base URL in Settings.",
+    );
+  }
+
+  if (!config.sttModel?.trim()) {
     throw new Error(
       "STT Model is missing. Please configure it in Settings.",
     );
   }
 
-  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  const baseUrl = normalizeBaseUrl(config.expensiveBaseUrl);
 
   const formData = new FormData();
 
-  /*
-   * The browser records WebM or OGG in most cases.
-   * The MIME type is preserved instead of always pretending it is WAV.
-   */
   const extension = audioBlob.type.includes("ogg")
     ? "ogg"
     : audioBlob.type.includes("wav")
       ? "wav"
-      : "webm";
+      : audioBlob.type.includes("mpeg") ||
+          audioBlob.type.includes("mp3")
+        ? "mp3"
+        : "webm";
 
   formData.append(
     "file",
@@ -129,14 +218,14 @@ export async function transcribeAudio(
     `audio.${extension}`,
   );
 
-  formData.append("model", config.sttModel);
+  formData.append("model", config.sttModel.trim());
 
   const response = await fetch(
     `${baseUrl}/audio/transcriptions`,
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.apiKey}`,
+        Authorization: `Bearer ${config.apiKey.trim()}`,
       },
       body: formData,
       signal,
@@ -172,6 +261,7 @@ export async function transcribeAudio(
 export async function runAgent(
   userInput: string,
   signal?: AbortSignal,
+  tier: LlmTier = "expensive",
 ): Promise<string> {
   throwIfAborted(signal);
 
@@ -181,15 +271,15 @@ export async function runAgent(
     throw new Error("User input cannot be empty.");
   }
 
-  const model = await getChatModel();
+  const model = await getAsyncLLM(tier);
 
   throwIfAborted(signal);
 
   const userMessage = new HumanMessage(cleanUserInput);
 
   /*
-   * Do not mutate global history until the request completes.
-   * This prevents cancelled user messages from becoming permanent context.
+   * History is committed only after a successful request.
+   * A cancelled or failed message will not become permanent context.
    */
   const requestMessages = [
     ...messageHistory,
@@ -210,29 +300,7 @@ export async function runAgent(
     response,
   ].slice(-MAX_HISTORY_MESSAGES);
 
-  if (typeof response.content === "string") {
-    return response.content.trim();
-  }
-
-  if (Array.isArray(response.content)) {
-    return response.content
-      .map((part) => {
-        if (
-          typeof part === "object" &&
-          part !== null &&
-          "text" in part &&
-          typeof part.text === "string"
-        ) {
-          return part.text;
-        }
-
-        return "";
-      })
-      .join("")
-      .trim();
-  }
-
-  return "";
+  return getResponseText(response.content);
 }
 
 export async function generateSpeech(
@@ -244,26 +312,26 @@ export async function generateSpeech(
   const config = await getApiConfig();
 
   throwIfAborted(signal);
-  validateBaseConfig(config);
+  validateApiKey(config);
 
-  if (!config.ttsModel || config.ttsModel.trim().length === 0) {
+  if (!config.expensiveBaseUrl?.trim()) {
+    throw new Error(
+      "Speech Base URL is missing. Configure the Expensive LLM Base URL in Settings.",
+    );
+  }
+
+  if (!config.ttsModel?.trim()) {
     throw new Error(
       "TTS Model is missing. Please configure it in Settings.",
     );
   }
 
-  if (!config.ttsVoice || config.ttsVoice.trim().length === 0) {
+  if (!config.ttsVoice?.trim()) {
     throw new Error(
       "TTS Voice is missing. Please configure it in Settings.",
     );
   }
 
-  const baseUrl = normalizeBaseUrl(config.baseUrl);
-
-  /*
-   * Keep punctuation because it improves TTS pauses and pronunciation.
-   * Remove only basic Markdown formatting characters.
-   */
   const cleanText = text
     .replace(/[*#_`]/g, "")
     .trim();
@@ -274,10 +342,12 @@ export async function generateSpeech(
     );
   }
 
+  const baseUrl = normalizeBaseUrl(config.expensiveBaseUrl);
+
   const payload = {
-    model: config.ttsModel,
+    model: config.ttsModel.trim(),
     input: cleanText,
-    voice: config.ttsVoice,
+    voice: config.ttsVoice.trim(),
   };
 
   console.log("Sending TTS request:", {
@@ -291,7 +361,7 @@ export async function generateSpeech(
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.apiKey}`,
+        Authorization: `Bearer ${config.apiKey.trim()}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),

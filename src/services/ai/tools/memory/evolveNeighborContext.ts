@@ -8,9 +8,9 @@ import {
 } from "@tauri-apps/plugin-fs";
 import { z } from "zod";
 
-import type { MemoryNode } from "./enrichMemory";
+import { getAsyncLLM } from "../../llm";
 import { textSimilarity } from "../textSimilarity";
-import { getAsyncLLM } from "../memory_tools";
+import type { MemoryNode } from "./enrichMemory";
 import { EVOLVE_NEIGHBOR_CONTEXT_PROMPT } from "./prompts";
 
 const MEMORY_DIRECTORY = "memory";
@@ -50,25 +50,41 @@ const evolvedNeighborSchema = z.object({
   tags: z.array(z.string().min(1)),
 });
 
-type EvolvedNeighborFields = z.infer<typeof evolvedNeighborSchema>;
+type EvolvedNeighborFields = z.infer<
+  typeof evolvedNeighborSchema
+>;
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException(
+      "The operation was cancelled.",
+      "AbortError",
+    );
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException &&
+    error.name === "AbortError"
+  );
+}
 
 /**
  * Evolves the existing memory graph for a newly prepared memory.
  *
- * This function DOES NOT save the new memory file.
- * The caller must save `memoryToSave` after this function returns.
+ * This function does not save the new memory file. The caller must save
+ * memoryToSave only after this function completes successfully.
  *
- * Flow:
- * 1. Reads DUPLICATE memories before deletion.
- * 2. Transfers their useful outgoing links to the new memory.
- * 3. Redirects existing memory links that target duplicates to the new memory ID.
- * 4. Deletes duplicate memory files.
- * 5. Evolves COMPLEMENTS neighbors using the language model.
- * 6. Returns final links for the new memory.
+ * Important: cancellation is cooperative. Tauri file operations already
+ * started cannot reliably be interrupted or rolled back.
  */
 export async function evolveNeighborContext(
   memoryToSave: MemoryNodeWithLinks,
+  signal?: AbortSignal,
 ): Promise<MemoryLink[]> {
+  throwIfAborted(signal);
+
   const originalLinks = memoryToSave.links ?? [];
 
   if (originalLinks.length === 0) {
@@ -84,21 +100,26 @@ export async function evolveNeighborContext(
     (link) => link.relationship !== "DUPLICATE",
   );
 
-  const replacementFileName = createMemoryFileName(memoryToSave.id);
+  const replacementFileName = createMemoryFileName(
+    memoryToSave.id,
+  );
 
   const duplicateIds = new Set(
     duplicateLinks.map((link) => link.targetId).filter(Boolean),
   );
 
   const duplicateFileNames = new Set(
-    duplicateLinks.map((link) => link.targetFileName).filter(Boolean),
+    duplicateLinks
+      .map((link) => link.targetFileName)
+      .filter(Boolean),
   );
 
-  /*
-   * Read duplicates before removing them. Their useful outgoing links
-   * are transferred to the new memory.
-   */
-  const duplicateMemories = await readDuplicateMemories(duplicateLinks);
+  const duplicateMemories = await readDuplicateMemories(
+    duplicateLinks,
+    signal,
+  );
+
+  throwIfAborted(signal);
 
   const transferredLinks = collectTransferredLinks(
     memoryToSave,
@@ -117,33 +138,45 @@ export async function evolveNeighborContext(
       link.targetFileName !== replacementFileName,
   );
 
-  /*
-   * The new memory is not written here.
-   * Its ID and expected file name are enough for redirecting old links.
-   */
   memoryToSave.links = finalLinks;
+
+  throwIfAborted(signal);
 
   if (duplicateLinks.length > 0) {
     await redirectDuplicateReferences(
       memoryToSave,
       duplicateIds,
       duplicateFileNames,
+      signal,
     );
 
-    await deleteDuplicateNeighbors(duplicateLinks);
+    throwIfAborted(signal);
+
+    await deleteDuplicateNeighbors(
+      duplicateLinks,
+      signal,
+    );
   }
 
-  await evolveComplementNeighbors(memoryToSave, finalLinks);
+  throwIfAborted(signal);
+
+  await evolveComplementNeighbors(
+    memoryToSave,
+    finalLinks,
+    signal,
+  );
+
+  throwIfAborted(signal);
 
   return memoryToSave.links;
 }
 
-/**
- * Reads duplicate memory files before they are deleted.
- */
 async function readDuplicateMemories(
   duplicateLinks: MemoryLink[],
+  signal?: AbortSignal,
 ): Promise<MemoryNodeWithLinks[]> {
+  throwIfAborted(signal);
+
   const duplicateMemories: MemoryNodeWithLinks[] = [];
 
   const uniqueFileNames = [
@@ -155,10 +188,19 @@ async function readDuplicateMemories(
   ];
 
   for (const fileName of uniqueFileNames) {
+    throwIfAborted(signal);
+
     try {
-      const memory = await readMemoryFile(fileName);
+      const memory = await readMemoryFile(fileName, signal);
+
+      throwIfAborted(signal);
+
       duplicateMemories.push(memory);
     } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+
       console.error(
         `Failed to read duplicate memory ${fileName}:`,
         error,
@@ -169,19 +211,16 @@ async function readDuplicateMemories(
   return duplicateMemories;
 }
 
-/**
- * Transfers non-duplicate links of deleted memories to the new memory.
- *
- * Links that point to another duplicate, the replacement memory,
- * or the duplicate memory itself are excluded.
- */
 function collectTransferredLinks(
   memoryToSave: MemoryNodeWithLinks,
   duplicateMemories: MemoryNodeWithLinks[],
   duplicateIds: Set<string>,
   duplicateFileNames: Set<string>,
 ): MemoryLink[] {
-  const replacementFileName = createMemoryFileName(memoryToSave.id);
+  const replacementFileName = createMemoryFileName(
+    memoryToSave.id,
+  );
+
   const transferredLinks: MemoryLink[] = [];
 
   for (const duplicateMemory of duplicateMemories) {
@@ -196,7 +235,8 @@ function collectTransferredLinks(
 
       const pointsToItself =
         link.targetId === duplicateMemory.id ||
-        link.targetFileName === createMemoryFileName(duplicateMemory.id);
+        link.targetFileName ===
+          createMemoryFileName(duplicateMemory.id);
 
       if (
         link.relationship === "DUPLICATE" ||
@@ -214,27 +254,25 @@ function collectTransferredLinks(
   return transferredLinks;
 }
 
-/**
- * Scans all existing memory files and redirects every link that points
- * to a duplicate memory toward the replacement memory.
- *
- * The replacement file does not need to exist at this point.
- * Its future file name is derived from replacementMemory.id.
- */
 async function redirectDuplicateReferences(
   replacementMemory: MemoryNodeWithLinks,
   duplicateIds: Set<string>,
   duplicateFileNames: Set<string>,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const replacementFileName = createMemoryFileName(replacementMemory.id);
-  const allFileNames = await readAllMemoryFileNames();
+  throwIfAborted(signal);
+
+  const replacementFileName = createMemoryFileName(
+    replacementMemory.id,
+  );
+
+  const allFileNames = await readAllMemoryFileNames(signal);
+
+  throwIfAborted(signal);
 
   for (const fileName of allFileNames) {
-    /*
-     * Duplicate files will be deleted later.
-     * The replacement file is not expected to exist yet, but this check
-     * also makes the function safe if it already exists.
-     */
+    throwIfAborted(signal);
+
     if (
       duplicateFileNames.has(fileName) ||
       fileName === replacementFileName
@@ -243,7 +281,10 @@ async function redirectDuplicateReferences(
     }
 
     try {
-      const memory = await readMemoryFile(fileName);
+      const memory = await readMemoryFile(fileName, signal);
+
+      throwIfAborted(signal);
+
       const originalLinks = memory.links ?? [];
 
       const redirectedLinks = originalLinks
@@ -256,10 +297,6 @@ async function redirectDuplicateReferences(
             return link;
           }
 
-          /*
-           * DUPLICATE is meaningful only while its target exists.
-           * After redirecting, it becomes RELATED.
-           */
           const relationship =
             link.relationship === "DUPLICATE"
               ? "RELATED"
@@ -281,16 +318,24 @@ async function redirectDuplicateReferences(
 
       const mergedLinks = mergeMemoryLinks(redirectedLinks);
 
+      throwIfAborted(signal);
+
       if (!areLinksEqual(originalLinks, mergedLinks)) {
         memory.links = mergedLinks;
 
-        await writeMemoryFile(fileName, memory);
+        await writeMemoryFile(fileName, memory, signal);
+
+        throwIfAborted(signal);
 
         console.log(
           `Duplicate references redirected in memory: ${fileName}`,
         );
       }
     } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+
       console.error(
         `Failed to redirect duplicate references in ${fileName}:`,
         error,
@@ -301,13 +346,12 @@ async function redirectDuplicateReferences(
   }
 }
 
-/**
- * Deletes duplicate memory files after all old graph references
- * have been redirected.
- */
 async function deleteDuplicateNeighbors(
   duplicateLinks: MemoryLink[],
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
+
   const duplicateFileNames = [
     ...new Set(
       duplicateLinks
@@ -317,6 +361,8 @@ async function deleteDuplicateNeighbors(
   ];
 
   for (const fileName of duplicateFileNames) {
+    throwIfAborted(signal);
+
     const filePath = createMemoryFilePath(fileName);
 
     try {
@@ -324,8 +370,12 @@ async function deleteDuplicateNeighbors(
         baseDir: BaseDirectory.AppData,
       });
 
+      throwIfAborted(signal);
+
       if (!fileExists) {
-        console.warn(`Duplicate file does not exist: ${fileName}`);
+        console.warn(
+          `Duplicate file does not exist: ${fileName}`,
+        );
         continue;
       }
 
@@ -333,8 +383,14 @@ async function deleteDuplicateNeighbors(
         baseDir: BaseDirectory.AppData,
       });
 
+      throwIfAborted(signal);
+
       console.log(`Duplicate memory deleted: ${fileName}`);
     } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+
       console.error(
         `Failed to delete duplicate memory ${fileName}:`,
         error,
@@ -345,21 +401,30 @@ async function deleteDuplicateNeighbors(
   }
 }
 
-/**
- * Updates context, key, tags, and embedding of COMPLEMENTS neighbors.
- */
 async function evolveComplementNeighbors(
   memoryToSave: MemoryNodeWithLinks,
   finalLinks: MemoryLink[],
+  signal?: AbortSignal,
 ): Promise<void> {
-  const loadedNeighbors = await readNonDuplicateNeighbors(finalLinks);
+  throwIfAborted(signal);
+
+  const loadedNeighbors = await readNonDuplicateNeighbors(
+    finalLinks,
+    signal,
+  );
+
+  throwIfAborted(signal);
 
   const complementLinks = finalLinks.filter(
     (link) => link.relationship === "COMPLEMENTS",
   );
 
   for (const link of complementLinks) {
-    const targetNeighbor = loadedNeighbors.get(link.targetFileName);
+    throwIfAborted(signal);
+
+    const targetNeighbor = loadedNeighbors.get(
+      link.targetFileName,
+    );
 
     if (!targetNeighbor) {
       console.error(
@@ -379,7 +444,10 @@ async function evolveComplementNeighbors(
         memoryToSave,
         targetNeighbor,
         neighborContexts,
+        signal,
       );
+
+      throwIfAborted(signal);
 
       const updatedNeighbor: MemoryNodeWithLinks = {
         ...targetNeighbor,
@@ -388,19 +456,50 @@ async function evolveComplementNeighbors(
         tags: evolvedFields.tags,
       };
 
-      updatedNeighbor.embedding = await textSimilarity.embedMemory({
-        content: updatedNeighbor.content,
-        context: updatedNeighbor.context,
-        key: updatedNeighbor.key,
-        tags: updatedNeighbor.tags,
-      });
+      /*
+       * embedMemory must accept and forward AbortSignal to its embedding
+       * provider. For example:
+       *
+       * embedMemory(memory, signal?: AbortSignal)
+       */
+      updatedNeighbor.embedding =
+        await textSimilarity.embedMemory(
+          {
+            content: updatedNeighbor.content,
+            context: updatedNeighbor.context,
+            key: updatedNeighbor.key,
+            tags: updatedNeighbor.tags,
+          },
+          signal,
+        );
 
-      await writeMemoryFile(link.targetFileName, updatedNeighbor);
+      throwIfAborted(signal);
 
-      loadedNeighbors.set(link.targetFileName, updatedNeighbor);
+      await writeMemoryFile(
+        link.targetFileName,
+        updatedNeighbor,
+        signal,
+      );
 
-      console.log(`Complement neighbor updated: ${link.targetFileName}`);
+      throwIfAborted(signal);
+
+      loadedNeighbors.set(
+        link.targetFileName,
+        updatedNeighbor,
+      );
+
+      console.log(
+        `Complement neighbor updated: ${link.targetFileName}`,
+      );
     } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+
+      /*
+       * A normal neighbor failure is isolated so another complement neighbor
+       * may still be evolved. Cancellation must never be isolated this way.
+       */
       console.error(
         `Failed to update complement neighbor ${link.targetFileName}:`,
         error,
@@ -409,12 +508,12 @@ async function evolveComplementNeighbors(
   }
 }
 
-/**
- * Reads each non-duplicate neighbor only once.
- */
 async function readNonDuplicateNeighbors(
   links: MemoryLink[],
+  signal?: AbortSignal,
 ): Promise<Map<string, MemoryNodeWithLinks>> {
+  throwIfAborted(signal);
+
   const neighbors = new Map<string, MemoryNodeWithLinks>();
 
   const uniqueFileNames = [
@@ -426,20 +525,29 @@ async function readNonDuplicateNeighbors(
   ];
 
   for (const fileName of uniqueFileNames) {
+    throwIfAborted(signal);
+
     try {
-      const memory = await readMemoryFile(fileName);
+      const memory = await readMemoryFile(fileName, signal);
+
+      throwIfAborted(signal);
+
       neighbors.set(fileName, memory);
     } catch (error) {
-      console.error(`Failed to read neighbor ${fileName}:`, error);
+      if (isAbortError(error)) {
+        throw error;
+      }
+
+      console.error(
+        `Failed to read neighbor ${fileName}:`,
+        error,
+      );
     }
   }
 
   return neighbors;
 }
 
-/**
- * Creates context data from all available neighbors except the target.
- */
 function createNeighborContexts(
   links: MemoryLink[],
   loadedNeighbors: Map<string, MemoryNodeWithLinks>,
@@ -452,7 +560,9 @@ function createNeighborContexts(
       continue;
     }
 
-    const neighbor = loadedNeighbors.get(link.targetFileName);
+    const neighbor = loadedNeighbors.get(
+      link.targetFileName,
+    );
 
     if (!neighbor) {
       continue;
@@ -474,59 +584,66 @@ function createNeighborContexts(
   return contexts;
 }
 
-/**
- * Uses the language model to evolve only context, key, and tags.
- */
 async function evolveNeighborWithLLM(
   newMemory: MemoryNodeWithLinks,
   targetNeighbor: MemoryNodeWithLinks,
   neighborContexts: NeighborContext[],
+  signal?: AbortSignal,
 ): Promise<EvolvedNeighborFields> {
-  const model = await getAsyncLLM();
+  throwIfAborted(signal);
+
+  const model = await getAsyncLLM("cheap");
+
+  throwIfAborted(signal);
 
   const structuredModel = model.withStructuredOutput(
     evolvedNeighborSchema,
   );
 
-  return structuredModel.invoke([
-    {
-      role: "system",
-      content: EVOLVE_NEIGHBOR_CONTEXT_PROMPT,
-    },
-    {
-      role: "user",
-      content: JSON.stringify(
-        {
-          newMemory: {
-            id: newMemory.id,
-            content: newMemory.content,
-            context: newMemory.context,
-            key: newMemory.key,
-            tags: newMemory.tags,
+  const result = await structuredModel.invoke(
+    [
+      {
+        role: "system",
+        content: EVOLVE_NEIGHBOR_CONTEXT_PROMPT,
+      },
+      {
+        role: "user",
+        content: JSON.stringify(
+          {
+            newMemory: {
+              id: newMemory.id,
+              content: newMemory.content,
+              context: newMemory.context,
+              key: newMemory.key,
+              tags: newMemory.tags,
+            },
+            targetNeighbor: {
+              id: targetNeighbor.id,
+              content: targetNeighbor.content,
+              context: targetNeighbor.context,
+              key: targetNeighbor.key,
+              tags: targetNeighbor.tags,
+            },
+            otherNeighbors: neighborContexts,
           },
-          targetNeighbor: {
-            id: targetNeighbor.id,
-            content: targetNeighbor.content,
-            context: targetNeighbor.context,
-            key: targetNeighbor.key,
-            tags: targetNeighbor.tags,
-          },
-          otherNeighbors: neighborContexts,
-        },
-        null,
-        2,
-      ),
+          null,
+          2,
+        ),
+      },
+    ],
+    {
+      signal,
     },
-  ]);
+  );
+
+  throwIfAborted(signal);
+
+  return result;
 }
 
-/**
- * Retains one link per target ID.
- *
- * Higher similarity wins. If similarity is equal,
- * higher confidence wins.
- */
-function mergeMemoryLinks(links: MemoryLink[]): MemoryLink[] {
+function mergeMemoryLinks(
+  links: MemoryLink[],
+): MemoryLink[] {
   const linksByTargetId = new Map<string, MemoryLink>();
 
   for (const link of links) {
@@ -534,7 +651,9 @@ function mergeMemoryLinks(links: MemoryLink[]): MemoryLink[] {
       continue;
     }
 
-    const existingLink = linksByTargetId.get(link.targetId);
+    const existingLink = linksByTargetId.get(
+      link.targetId,
+    );
 
     if (!existingLink) {
       linksByTargetId.set(link.targetId, link);
@@ -561,13 +680,16 @@ function areLinksEqual(
   return JSON.stringify(firstLinks) === JSON.stringify(secondLinks);
 }
 
-/**
- * Reads all JSON file names from AppData/memory.
- */
-async function readAllMemoryFileNames(): Promise<string[]> {
+async function readAllMemoryFileNames(
+  signal?: AbortSignal,
+): Promise<string[]> {
+  throwIfAborted(signal);
+
   const directoryExists = await exists(MEMORY_DIRECTORY, {
     baseDir: BaseDirectory.AppData,
   });
+
+  throwIfAborted(signal);
 
   if (!directoryExists) {
     return [];
@@ -576,6 +698,8 @@ async function readAllMemoryFileNames(): Promise<string[]> {
   const entries = await readDir(MEMORY_DIRECTORY, {
     baseDir: BaseDirectory.AppData,
   });
+
+  throwIfAborted(signal);
 
   return entries
     .filter(
@@ -587,43 +711,48 @@ async function readAllMemoryFileNames(): Promise<string[]> {
     .map((entry) => entry.name);
 }
 
-/**
- * Reads one memory JSON file from AppData/memory.
- */
 async function readMemoryFile(
   fileName: string,
+  signal?: AbortSignal,
 ): Promise<MemoryNodeWithLinks> {
+  throwIfAborted(signal);
+
   const filePath = createMemoryFilePath(fileName);
 
   const fileExists = await exists(filePath, {
     baseDir: BaseDirectory.AppData,
   });
 
+  throwIfAborted(signal);
+
   if (!fileExists) {
-    throw new Error(`Memory file does not exist: ${fileName}`);
+    throw new Error(
+      `Memory file does not exist: ${fileName}`,
+    );
   }
 
   const fileContent = await readTextFile(filePath, {
     baseDir: BaseDirectory.AppData,
   });
 
+  throwIfAborted(signal);
+
   try {
     return JSON.parse(fileContent) as MemoryNodeWithLinks;
   } catch {
-    throw new Error(`Memory file contains invalid JSON: ${fileName}`);
+    throw new Error(
+      `Memory file contains invalid JSON: ${fileName}`,
+    );
   }
 }
 
-/**
- * Writes an existing memory JSON file.
- *
- * This function is used only for old neighbors and graph updates.
- * It is not used to save memoryToSave.
- */
 async function writeMemoryFile(
   fileName: string,
   memory: MemoryNodeWithLinks,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
+
   const filePath = createMemoryFilePath(fileName);
 
   await writeTextFile(
@@ -633,6 +762,8 @@ async function writeMemoryFile(
       baseDir: BaseDirectory.AppData,
     },
   );
+
+  throwIfAborted(signal);
 }
 
 function createMemoryFileName(memoryId: string): string {

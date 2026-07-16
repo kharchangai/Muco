@@ -1,10 +1,17 @@
 import { load, Store } from "@tauri-apps/plugin-store";
 
 export type AppSettings = {
-  // Main LLM settings
+  // LLM settings
   apiKey: string;
-  baseUrl: string;
-  llmModel: string;
+
+  cheapBaseUrl: string;
+  cheapModel: string;
+
+  mediumBaseUrl: string;
+  mediumModel: string;
+
+  expensiveBaseUrl: string;
+  expensiveModel: string;
 
   // Speech settings
   sttModel: string;
@@ -81,11 +88,41 @@ export async function readSettings(): Promise<AppSettings> {
 
   const rawDepth = await store.get<number>("MOCU_SEARCH_DEPTH");
 
+  const legacyBaseUrl = (
+    (await store.get<string>("MOCU_BASE_URL")) || ""
+  ).trim();
+
+  const legacyLlmModel = (
+    (await store.get<string>("MOCU_LLM_MODEL")) || ""
+  ).trim();
+
+  const expensiveBaseUrl = (
+    (await store.get<string>("MOCU_EXPENSIVE_BASE_URL")) || legacyBaseUrl
+  ).trim();
+
+  const expensiveModel = (
+    (await store.get<string>("MOCU_EXPENSIVE_MODEL")) || legacyLlmModel
+  ).trim();
+
   return {
-    // Main LLM settings
+    // LLM settings
     apiKey: ((await store.get<string>("MOCU_API_KEY")) || "").trim(),
-    baseUrl: ((await store.get<string>("MOCU_BASE_URL")) || "").trim(),
-    llmModel: ((await store.get<string>("MOCU_LLM_MODEL")) || "").trim(),
+
+    cheapBaseUrl: (
+      (await store.get<string>("MOCU_CHEAP_BASE_URL")) || ""
+    ).trim(),
+    cheapModel: ((await store.get<string>("MOCU_CHEAP_MODEL")) || "").trim(),
+
+    mediumBaseUrl: (
+      (await store.get<string>("MOCU_MEDIUM_BASE_URL")) || ""
+    ).trim(),
+    mediumModel: (
+      (await store.get<string>("MOCU_MEDIUM_MODEL")) || ""
+    ).trim(),
+
+    // Falls back to old settings for migration compatibility.
+    expensiveBaseUrl,
+    expensiveModel,
 
     // Speech settings
     sttModel: ((await store.get<string>("MOCU_STT_MODEL")) || "").trim(),
@@ -132,10 +169,35 @@ export async function readSettings(): Promise<AppSettings> {
 export async function saveSettings(settings: AppSettings): Promise<void> {
   const store = await getSettingsStore();
 
-  // Main LLM settings
+  // LLM settings
   await store.set("MOCU_API_KEY", (settings.apiKey || "").trim());
-  await store.set("MOCU_BASE_URL", (settings.baseUrl || "").trim());
-  await store.set("MOCU_LLM_MODEL", (settings.llmModel || "").trim());
+
+  await store.set(
+    "MOCU_CHEAP_BASE_URL",
+    (settings.cheapBaseUrl || "").trim(),
+  );
+  await store.set(
+    "MOCU_CHEAP_MODEL",
+    (settings.cheapModel || "").trim(),
+  );
+
+  await store.set(
+    "MOCU_MEDIUM_BASE_URL",
+    (settings.mediumBaseUrl || "").trim(),
+  );
+  await store.set(
+    "MOCU_MEDIUM_MODEL",
+    (settings.mediumModel || "").trim(),
+  );
+
+  await store.set(
+    "MOCU_EXPENSIVE_BASE_URL",
+    (settings.expensiveBaseUrl || "").trim(),
+  );
+  await store.set(
+    "MOCU_EXPENSIVE_MODEL",
+    (settings.expensiveModel || "").trim(),
+  );
 
   // Speech settings
   await store.set("MOCU_STT_MODEL", (settings.sttModel || "").trim());
@@ -191,7 +253,5 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
   );
 
   await store.save();
-
-  // Makes the cached Store reflect the persisted file.
   await reloadStore(store);
 }

@@ -13,7 +13,7 @@ import {
   createMemory,
   type CreatedMemoryResult,
 } from "./createMemory";
-import { getAsyncLLM } from "../memory_tools";
+import { getAsyncLLM } from "../../llm";
 import { MEMORY_GATE_PROMPT } from "./prompts";
 
 const MEMORY_DIRECTORY = "memory";
@@ -38,29 +38,56 @@ export type ProcessUserMessageResult = {
   failures: MemoryCreationFailure[];
 };
 
+const createAbortError = (): DOMException => {
+  return new DOMException(
+    "The operation was cancelled.",
+    "AbortError",
+  );
+};
+
+const throwIfAborted = (
+  signal?: AbortSignal,
+): void => {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+};
+
+export const isAbortError = (
+  error: unknown,
+): boolean => {
+  if (error instanceof DOMException) {
+    return error.name === "AbortError";
+  }
+
+  if (error instanceof Error) {
+    return error.name === "AbortError";
+  }
+
+  return false;
+};
+
 /**
  * Processes one raw user message for long-term memory.
  *
- * Pipeline:
- * 1. Evaluate whether the raw message is worth processing as long-term memory.
- * 2. Stop immediately when the memory gate rejects the message.
- * 3. Ensure AppData/memory exists.
- * 4. Extract atomic memory candidates from the raw user message.
- * 5. Create one complete memory for every extracted atomic memory.
- * 6. Return the gate decision, created memories, and per-memory failures.
+ * Cancellation behavior:
+ * - If the signal is already aborted, throws AbortError immediately.
+ * - Stops before every next pipeline stage.
+ * - Passes the signal to LLM-based extraction and memory creation.
+ * - Does not convert AbortError to a normal memory failure.
  *
- * createMemory is responsible for:
- * - Enrichment
- * - Similarity search
- * - Relationship analysis
- * - Link creation
- * - Neighbor evolution
- * - Duplicate handling
- * - Saving memory/{id}.json
+ * Pipeline:
+ * 1. Evaluate the memory gate.
+ * 2. Ensure AppData/memory exists.
+ * 3. Extract atomic memory candidates.
+ * 4. Create memories sequentially.
  */
 export async function processUserMessage(
   userText: string,
+  signal?: AbortSignal,
 ): Promise<ProcessUserMessageResult> {
+  throwIfAborted(signal);
+
   const text = userText?.trim();
 
   const emptyResult: ProcessUserMessageResult = {
@@ -78,8 +105,19 @@ export async function processUserMessage(
   let gate: MemoryGateResult;
 
   try {
-    gate = await evaluateMemoryGate(text);
+    throwIfAborted(signal);
+
+    gate = await evaluateMemoryGate(
+      text,
+      signal,
+    );
+
+    throwIfAborted(signal);
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
     console.error(
       "[Memory processing] Failed to evaluate memory gate:",
       error,
@@ -87,8 +125,8 @@ export async function processUserMessage(
 
     /*
      * Fail closed:
-     * If the gate cannot make a decision, do not run the expensive memory
-     * pipeline accidentally. The next user message can be processed normally.
+     * If the gate cannot make a decision, do not accidentally run
+     * the expensive memory pipeline.
      */
     return {
       ...emptyResult,
@@ -113,8 +151,18 @@ export async function processUserMessage(
   }
 
   try {
-    await ensureMemoryDirectoryExists();
+    throwIfAborted(signal);
+
+    await ensureMemoryDirectoryExists(
+      signal,
+    );
+
+    throwIfAborted(signal);
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
     console.error(
       "[Memory processing] Failed to ensure memory directory:",
       error,
@@ -135,8 +183,23 @@ export async function processUserMessage(
   let atomicMemories: AtomicMemory[];
 
   try {
-    atomicMemories = await extractAtomicMemories(text);
+    throwIfAborted(signal);
+
+    /*
+     * extractAtomicMemories must accept:
+     * (userText: string, signal?: AbortSignal)
+     */
+    atomicMemories = await extractAtomicMemories(
+      text,
+      signal,
+    );
+
+    throwIfAborted(signal);
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
     console.error(
       "[Memory processing] Failed to extract atomic memories:",
       error,
@@ -166,20 +229,36 @@ export async function processUserMessage(
   const failures: MemoryCreationFailure[] = [];
 
   /*
-   * Processing is intentionally sequential.
+   * Keep this sequential.
    *
-   * A memory created earlier in the same user message can be found and linked
-   * when createMemory processes the next atomic memory.
-   *
-   * Do not use Promise.all here because concurrent createMemory calls may
-   * read, update, redirect, or remove the same memory files at the same time.
+   * createMemory may search, evolve, redirect, update, or save files that
+   * are relevant to the next atomic memory in the same user message.
    */
   for (const atomicMemory of atomicMemories) {
+    throwIfAborted(signal);
+
     try {
-      const createdMemory = await createMemory(atomicMemory.content);
+      /*
+       * createMemory must accept:
+       * (content: string, signal?: AbortSignal)
+       */
+      const createdMemory = await createMemory(
+        atomicMemory.content,
+        signal,
+      );
+
+      throwIfAborted(signal);
 
       createdMemories.push(createdMemory);
     } catch (error) {
+      /*
+       * Cancellation must immediately stop the entire pipeline.
+       * It is not a per-memory failure.
+       */
+      if (isAbortError(error)) {
+        throw error;
+      }
+
       console.error(
         "[Memory processing] Failed to create memory:",
         atomicMemory.content,
@@ -193,6 +272,8 @@ export async function processUserMessage(
     }
   }
 
+  throwIfAborted(signal);
+
   return {
     userText: text,
     gate,
@@ -203,43 +284,69 @@ export async function processUserMessage(
 }
 
 /**
- * Uses the language model to decide whether a raw user message is worth
+ * Uses the cheap model to decide whether a raw user message is worth
  * sending to the long-term memory pipeline.
  */
 async function evaluateMemoryGate(
   userText: string,
+  signal?: AbortSignal,
 ): Promise<MemoryGateResult> {
-  const model = await getAsyncLLM();
+  throwIfAborted(signal);
+
+  const model = await getAsyncLLM("cheap");
+
+  throwIfAborted(signal);
 
   const structuredModel = model.withStructuredOutput(
     memoryGateSchema,
   );
 
-  return structuredModel.invoke([
+  const result = await structuredModel.invoke(
+    [
+      {
+        role: "system",
+        content: MEMORY_GATE_PROMPT,
+      },
+      {
+        role: "user",
+        content: JSON.stringify(
+          {
+            userText,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
     {
-      role: "system",
-      content: MEMORY_GATE_PROMPT,
+      signal,
     },
-    {
-      role: "user",
-      content: JSON.stringify(
-        {
-          userText,
-        },
-        null,
-        2,
-      ),
-    },
-  ]);
+  );
+
+  throwIfAborted(signal);
+
+  return result;
 }
 
 /**
- * Ensures that AppData/memory exists before memory extraction and creation.
+ * Ensures AppData/memory exists.
+ *
+ * Tauri file operations cannot always be interrupted once started,
+ * but checks before and after prevent the next pipeline stage from running.
  */
-async function ensureMemoryDirectoryExists(): Promise<void> {
-  const memoryDirectoryExists = await exists(MEMORY_DIRECTORY, {
-    baseDir: BaseDirectory.AppData,
-  });
+async function ensureMemoryDirectoryExists(
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal);
+
+  const memoryDirectoryExists = await exists(
+    MEMORY_DIRECTORY,
+    {
+      baseDir: BaseDirectory.AppData,
+    },
+  );
+
+  throwIfAborted(signal);
 
   if (memoryDirectoryExists) {
     return;
@@ -249,6 +356,8 @@ async function ensureMemoryDirectoryExists(): Promise<void> {
     baseDir: BaseDirectory.AppData,
     recursive: true,
   });
+
+  throwIfAborted(signal);
 }
 
 function getErrorMessage(error: unknown): string {

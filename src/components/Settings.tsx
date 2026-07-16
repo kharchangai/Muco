@@ -2,11 +2,79 @@ import React, { useEffect, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { readSettings, saveSettings } from "../store";
 
+type LlmTierCardProps = {
+  title: string;
+  baseUrl: string;
+  model: string;
+  disabled: boolean;
+  onBaseUrlChange: (value: string) => void;
+  onModelChange: (value: string) => void;
+  inputClassName: string;
+  labelClassName: string;
+  modelPlaceholder: string;
+};
+
+const LlmTierCard: React.FC<LlmTierCardProps> = ({
+  title,
+  baseUrl,
+  model,
+  disabled,
+  onBaseUrlChange,
+  onModelChange,
+  inputClassName,
+  labelClassName,
+  modelPlaceholder,
+}) => {
+  return (
+    <div className="bg-[#0c0c0c] border border-white/5 p-4 rounded-xl flex flex-col gap-4">
+      <div className="border-b border-white/5 pb-2">
+        <h4 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">
+          {title}
+        </h4>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label className={labelClassName}>Base URL</label>
+        <input
+          type="text"
+          value={baseUrl}
+          disabled={disabled}
+          onChange={(event) => onBaseUrlChange(event.target.value)}
+          placeholder="https://api.openai.com/v1"
+          className={inputClassName}
+        />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label className={labelClassName}>Model Name</label>
+        <input
+          type="text"
+          value={model}
+          disabled={disabled}
+          onChange={(event) => onModelChange(event.target.value)}
+          placeholder={modelPlaceholder}
+          className={inputClassName}
+        />
+      </div>
+    </div>
+  );
+};
+
 export const Settings: React.FC = () => {
-  // Main LLM settings
+  // Shared LLM API key
   const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [llmModel, setLlmModel] = useState("");
+
+  // Cheap LLM settings
+  const [cheapBaseUrl, setCheapBaseUrl] = useState("");
+  const [cheapModel, setCheapModel] = useState("");
+
+  // Medium LLM settings
+  const [mediumBaseUrl, setMediumBaseUrl] = useState("");
+  const [mediumModel, setMediumModel] = useState("");
+
+  // Expensive LLM settings
+  const [expensiveBaseUrl, setExpensiveBaseUrl] = useState("");
+  const [expensiveModel, setExpensiveModel] = useState("");
 
   // Speech settings
   const [sttModel, setSttModel] = useState("");
@@ -45,10 +113,17 @@ export const Settings: React.FC = () => {
           return;
         }
 
-        // Main LLM settings
+        // LLM settings
         setApiKey(settings.apiKey);
-        setBaseUrl(settings.baseUrl);
-        setLlmModel(settings.llmModel);
+
+        setCheapBaseUrl(settings.cheapBaseUrl);
+        setCheapModel(settings.cheapModel);
+
+        setMediumBaseUrl(settings.mediumBaseUrl);
+        setMediumModel(settings.mediumModel);
+
+        setExpensiveBaseUrl(settings.expensiveBaseUrl);
+        setExpensiveModel(settings.expensiveModel);
 
         // Speech settings
         setSttModel(settings.sttModel);
@@ -95,10 +170,17 @@ export const Settings: React.FC = () => {
 
     try {
       await saveSettings({
-        // Main LLM settings
+        // LLM settings
         apiKey,
-        baseUrl,
-        llmModel,
+
+        cheapBaseUrl,
+        cheapModel,
+
+        mediumBaseUrl,
+        mediumModel,
+
+        expensiveBaseUrl,
+        expensiveModel,
 
         // Speech settings
         sttModel,
@@ -172,53 +254,64 @@ export const Settings: React.FC = () => {
         }
       `}</style>
 
-      {/* Header */}
       <div className="border-b border-white/5 pb-4">
         <h3 className="text-[11px] font-bold tracking-widest text-white/50 uppercase">
           Mocu Settings
         </h3>
       </div>
 
-      {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto no-scrollbar my-4 pr-0.5 flex flex-col gap-5 max-h-[calc(100vh-140px)]">
-        {/* Main AI Settings */}
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
-            <label className={labelClassName}>API Key</label>
+            <label className={labelClassName}>LLM API Key</label>
             <input
               type="password"
               value={apiKey}
               disabled={isSaving}
               onChange={(event) => setApiKey(event.target.value)}
-              placeholder="Enter your LLM API key"
+              placeholder="Shared API key for LLM providers"
               className={inputClassName}
             />
           </div>
+        </div>
 
-          <div className="flex flex-col gap-1.5">
-            <label className={labelClassName}>Base URL</label>
-            <input
-              type="text"
-              value={baseUrl}
-              disabled={isSaving}
-              onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="https://api.openai.com/v1"
-              className={inputClassName}
-            />
-          </div>
+        <LlmTierCard
+          title="Cheap LLM"
+          baseUrl={cheapBaseUrl}
+          model={cheapModel}
+          disabled={isSaving}
+          onBaseUrlChange={setCheapBaseUrl}
+          onModelChange={setCheapModel}
+          inputClassName={cardInputClassName}
+          labelClassName={cardLabelClassName}
+          modelPlaceholder="Cheap model name"
+        />
 
-          <div className="flex flex-col gap-1.5">
-            <label className={labelClassName}>LLM Model</label>
-            <input
-              type="text"
-              value={llmModel}
-              disabled={isSaving}
-              onChange={(event) => setLlmModel(event.target.value)}
-              placeholder="Your chat model name"
-              className={inputClassName}
-            />
-          </div>
+        <LlmTierCard
+          title="Medium LLM"
+          baseUrl={mediumBaseUrl}
+          model={mediumModel}
+          disabled={isSaving}
+          onBaseUrlChange={setMediumBaseUrl}
+          onModelChange={setMediumModel}
+          inputClassName={cardInputClassName}
+          labelClassName={cardLabelClassName}
+          modelPlaceholder="Medium model name"
+        />
 
+        <LlmTierCard
+          title="Expensive LLM"
+          baseUrl={expensiveBaseUrl}
+          model={expensiveModel}
+          disabled={isSaving}
+          onBaseUrlChange={setExpensiveBaseUrl}
+          onModelChange={setExpensiveModel}
+          inputClassName={cardInputClassName}
+          labelClassName={cardLabelClassName}
+          modelPlaceholder="Best reasoning model name"
+        />
+
+        <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <label className={labelClassName}>STT Model</label>
             <input
@@ -258,7 +351,6 @@ export const Settings: React.FC = () => {
           </div>
         </div>
 
-        {/* Embedding Settings */}
         <div className="bg-[#0c0c0c] border border-white/5 p-4 rounded-xl flex flex-col gap-4 mt-2">
           <div className="border-b border-white/5 pb-2">
             <h4 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">
@@ -273,7 +365,7 @@ export const Settings: React.FC = () => {
               value={embeddingApiKey}
               disabled={isSaving}
               onChange={(event) => setEmbeddingApiKey(event.target.value)}
-              placeholder="Leave empty if your provider does not require a key"
+              placeholder="Leave empty if not required"
               className={cardInputClassName}
             />
           </div>
@@ -303,7 +395,6 @@ export const Settings: React.FC = () => {
           </div>
         </div>
 
-        {/* Vision Settings */}
         <div className="bg-[#0c0c0c] border border-white/5 p-4 rounded-xl flex flex-col gap-4 mt-2">
           <div className="border-b border-white/5 pb-2">
             <h4 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">
@@ -348,7 +439,6 @@ export const Settings: React.FC = () => {
           </div>
         </div>
 
-        {/* Perplexity Settings */}
         <div className="bg-[#0c0c0c] border border-white/5 p-4 rounded-xl flex flex-col gap-4 mt-2">
           <div className="border-b border-white/5 pb-2">
             <h4 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">
@@ -403,7 +493,9 @@ export const Settings: React.FC = () => {
                 disabled={isSaving}
                 onChange={(event) => {
                   const nextValue = Number(event.target.value);
-                  setSearchDepth(Number.isFinite(nextValue) ? nextValue : 3);
+                  setSearchDepth(
+                    Number.isFinite(nextValue) ? nextValue : 3,
+                  );
                 }}
                 className={cardInputClassName}
               />
@@ -412,7 +504,6 @@ export const Settings: React.FC = () => {
         </div>
       </div>
 
-      {/* Action buttons */}
       <div className="flex gap-3 pt-4 border-t border-white/5">
         <button
           type="button"

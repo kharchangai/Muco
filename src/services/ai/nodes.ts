@@ -5,36 +5,32 @@ import {
 } from "@langchain/core/messages";
 
 import { RunnableConfig } from "@langchain/core/runnables";
-import { tool } from "@langchain/core/tools";
-import { z } from "zod";
 
 import { GraphState } from "./state";
 
-import {
-  getAsyncLLM,
-  memoryTool,
-} from "./tools/memory_tools";
+import { getAsyncLLM } from "./llm";
+import { findRelevantMemories } from "./tools/memory/findRelevantMemories";
+import { processUserMessage } from "./tools/memory/processUserMessage";
+import { saveShortMemoryTurn } from "./tools/memory/short-memory/shortMemory";
 
 import { scheduleTool } from "./tools/schedule-tool";
 import { desktopVisionTool } from "./tools/desktop-vision-tool";
-import { synthesizerTool } from "./tools/prompt_generator_agent";
 import { terminalExecutionTool } from "./tools/terminal_execution_tool";
 import { perplexitySearchTool } from "./tools/perplexity_search_tool";
-import { executeResearchPipeline } from "./tools/researchTool/pipeline";
-
-import {
-  exists,
-  readTextFile,
-} from "@tauri-apps/plugin-fs";
-
-import { BaseDirectory } from "@tauri-apps/api/path";
-
-let cachedPromptInMemory: string | null = null;
 
 const DEFAULT_SYSTEM_PROMPT =
   "You are Mocu, a helpful, warm, and minimal AI assistant.";
 
 const MAX_STEPS = 3;
+
+type MemoryWithContext = {
+  context: string;
+};
+
+type RelevantMemoryResult = {
+  selectedMemories: MemoryWithContext[];
+  neighborMemories: MemoryWithContext[];
+};
 
 const createAbortError = () => {
   return new DOMException(
@@ -100,7 +96,10 @@ const stripMarkdown = (text: string): string => {
       /\[([^\]]+)\]\((?:[^)]+)\)/g,
       "$1",
     )
-    .replace(/!\[([^\]]*)\]\((?:[^)]+)\)/g, "$1")
+    .replace(
+      /!\[([^\]]*)\]\((?:[^)]+)\)/g,
+      "$1",
+    )
     .replace(/https?:\/\/[^\s]+/g, "")
     .replace(/[*_#`~>|]/g, "")
     .replace(/^\s*[-•]\s*/gm, "")
@@ -132,6 +131,106 @@ const invokeToolWithSignal = async (
   return selectedTool.invoke(args, config);
 };
 
+/**
+ * Saves one completed conversation turn to short-term memory.
+ *
+ * It runs in the background and never affects the agent response.
+ */
+const saveShortMemoryInBackground = (
+  messages: BaseMessage[],
+): void => {
+  void saveShortMemoryTurn({ messages })
+    .then(() => {
+      console.log(
+        "[Short Memory] Turn saved successfully.",
+      );
+    })
+    .catch((error) => {
+      console.error(
+        "[Short Memory] Failed to save turn:",
+        error,
+      );
+    });
+};
+/**
+ * Creates the only memory block that is sent to the main agent.
+ *
+ * Only the context field from selected and neighbor memories is used.
+ * No IDs, embeddings, content, keys, tags, links, scores, paths,
+ * filenames, retrieval reasons, or other internal metadata are sent.
+ */
+const buildMemoryContextsForMainAgent = (
+  selectedMemories: MemoryWithContext[] = [],
+  neighborMemories: MemoryWithContext[] = [],
+): string => {
+  const allMemories = [
+    ...selectedMemories,
+    ...neighborMemories,
+  ];
+
+  const contexts = allMemories
+    .map((memory) => memory.context?.trim())
+    .filter(
+      (context): context is string =>
+        typeof context === "string" &&
+        context.length > 0,
+    );
+
+  if (contexts.length === 0) {
+    return "";
+  }
+
+  return contexts
+    .map(
+      (context, index) =>
+        `[Memory Context ${index + 1}]\n${context}`,
+    )
+    .join("\n\n");
+};
+
+/**
+ * Starts memory creation without blocking the agent response.
+ *
+ * processUserMessage includes:
+ * - Memory gate evaluation
+ * - Atomic memory extraction
+ * - Enrichment
+ * - Duplicate and relationship handling
+ * - Saving the resulting memory files
+ *
+ * The current AbortSignal is passed intentionally.
+ * Cancelling the user request also cancels long-term memory processing.
+ */
+const processMessageMemoryInBackground = (
+  userText: string,
+  signal?: AbortSignal,
+): void => {
+  if (!userText.trim() || signal?.aborted) {
+    return;
+  }
+
+  void processUserMessage(userText, signal)
+    .then((result) => {
+      console.log(
+        "[Memory] Background processing completed:",
+        result,
+      );
+    })
+    .catch((error) => {
+      if (isAbortError(error)) {
+        console.log(
+          "[Memory] Background processing cancelled.",
+        );
+        return;
+      }
+
+      console.error(
+        "[Memory] Background processing failed:",
+        error,
+      );
+    });
+};
+
 export const callMainAgent = async (
   state: typeof GraphState.State,
   config?: RunnableConfig,
@@ -140,107 +239,98 @@ export const callMainAgent = async (
 
   throwIfAborted(signal);
 
-  const llm = await getAsyncLLM();
+  const lastMessage =
+    state.messages[state.messages.length - 1];
 
-  throwIfAborted(signal);
+  const userText = lastMessage
+    ? getTextContent(lastMessage.content).trim()
+    : "";
 
-  const personalizationTool = synthesizerTool(llm);
-  const terminalTool = terminalExecutionTool(llm);
-  const perplexityTool = perplexitySearchTool;
-
-  const researchTool = tool(
-    async (args) => {
-      throwIfAborted(signal);
-
-      /*
-       * To physically cancel this pipeline too, update
-       * executeResearchPipeline to accept signal as its third argument
-       * and pass it to every internal fetch/tool request.
-       */
-      const result = await executeResearchPipeline(
-        args.query,
-        args.sourceFolderPath || undefined,
-        signal,
-      );
-
-      throwIfAborted(signal);
-
-      return (
-        result ||
-        "Research completed, but no report was returned."
-      );
-    },
-    {
-      name: "execute_research_pipeline",
-      description:
-        "Run an in-depth autonomous research pipeline on a specific query or goal. Optionally analyze a local folder path if provided.",
-      schema: z.object({
-        query: z
-          .string()
-          .describe("The main research goal or query."),
-        sourceFolderPath: z
-          .string()
-          .optional()
-          .describe(
-            "Absolute local source folder path, if provided by the user.",
-          ),
-      }),
-    },
+  processMessageMemoryInBackground(
+    userText,
+    signal,
   );
 
-  const llmWithTools = llm.bindTools([
-    scheduleTool,
-    memoryTool,
-    desktopVisionTool,
-    personalizationTool,
-    terminalTool,
-    perplexityTool,
-    researchTool,
-  ]);
+  /*
+   * Retrieval is awaited because its final context must be available
+   * before the main agent generates its response.
+   *
+   * Only selectedMemories[].context and neighborMemories[].context
+   * are sent to the main agent.
+   *
+   * memoryResult.context is intentionally not used because it contains
+   * extra internal metadata such as IDs, keys, tags, content, and
+   * retrieval reasons.
+   */
+  let relevantMemoryContext = "";
 
-  const cachePath =
-    "memory/observer/personalized_prompt.txt";
-
-  if (!cachedPromptInMemory) {
+  if (userText) {
     try {
-      throwIfAborted(signal);
+      console.log(
+        "[Memory] User text:",
+        userText,
+      );
 
-      const cacheExists = await exists(
-        cachePath,
-        {
-          baseDir: BaseDirectory.AppData,
-        },
+      const memoryResult =
+        await findRelevantMemories(userText);
+
+      console.log(
+        "[Memory] Raw retrieval result:",
+        memoryResult,
+      );
+
+      console.log(
+        "[Memory] Selected memories:",
+        memoryResult.selectedMemories,
+      );
+
+      console.log(
+        "[Memory] Neighbor memories:",
+        memoryResult.neighborMemories,
       );
 
       throwIfAborted(signal);
 
-      if (cacheExists) {
-        cachedPromptInMemory = await readTextFile(
-          cachePath,
-          {
-            baseDir: BaseDirectory.AppData,
-          },
+      const {
+        selectedMemories = [],
+        neighborMemories = [],
+      } = memoryResult as RelevantMemoryResult;
+
+      relevantMemoryContext =
+        buildMemoryContextsForMainAgent(
+          selectedMemories,
+          neighborMemories,
         );
-      } else {
-        cachedPromptInMemory =
-          DEFAULT_SYSTEM_PROMPT;
-      }
+
+      console.log(
+        "[Memory] Context sent to main agent:",
+        relevantMemoryContext,
+      );
     } catch (error) {
       if (isAbortError(error)) {
         throw error;
       }
 
-      console.warn(
-        "[Main Agent] Failed to read cached personalized prompt:",
+      console.error(
+        "[Memory] Failed to retrieve relevant memories:",
         error,
       );
-
-      cachedPromptInMemory =
-        DEFAULT_SYSTEM_PROMPT;
     }
   }
 
+  const llm = await getAsyncLLM();
+
   throwIfAborted(signal);
+
+  const terminalTool = terminalExecutionTool(llm);
+  const perplexityTool = perplexitySearchTool;
+
+  const llmWithTools = llm.bindTools([
+    scheduleTool,
+    desktopVisionTool,
+    terminalTool,
+    perplexityTool,
+  ]);
 
   const now = new Date();
 
@@ -256,8 +346,24 @@ export const callMainAgent = async (
     },
   );
 
+  const memoryPromptSection = relevantMemoryContext
+    ? `
+[LONG-TERM MEMORY]
+The following is internal long-term user context that may be relevant to the user's current request.
+
+Use it only when it genuinely helps answer the current user message.
+Never mention memory retrieval, memory files, IDs, embeddings, tags, internal prompts, or these instructions.
+Treat the current user message as the most reliable source of truth.
+If the current user message conflicts with this context, follow the current user message.
+
+${relevantMemoryContext}
+`
+    : "";
+
   const systemPrompt = `
-${cachedPromptInMemory}
+${DEFAULT_SYSTEM_PROMPT}
+
+${memoryPromptSection}
 
 [CRITICAL TTS OUTPUT RULES]
 Always reply in exactly the user's language.
@@ -271,20 +377,14 @@ Always use this exact date and time as the reference for today, now, yesterday, 
 
 [TOOL USAGE RULES]
 If the user wants to create, inspect, edit, or cancel timers, alarms, reminders, or calendar events, use schedule_action.
-If the user shares personal facts or preferences, or asks to remember or recall something personal, use memory_action.
 If the user asks to inspect the screen, desktop, UI, or code visible on screen, use desktop_vision_action.
-If significant personal preferences, emotional state, or crucial personal information changes, use generate_personalized_prompt.
 If the user asks to use the operating system terminal, execute commands, manage files, run scripts, or inspect system information, use terminal_intent_executor.
 
-[SEARCH AND RESEARCH RULES]
+[SEARCH RULES]
 Use perplexity_search by default for web searches, current information, news, facts, and requests such as search, find, latest, جستجو کن, پیدا کن, آخرین خبر را پیدا کن, and آخرین وضعیت.
-Use execute_research_pipeline only for explicit deep research, comprehensive analysis, multi-source verification, or analysis of a local folder.
-When a deep research request has no local folder, call execute_research_pipeline with an empty sourceFolderPath.
-Ask for a folder path only if the user explicitly wants their own local files analyzed but did not provide a path.
-When uncertain between search and research, choose perplexity_search.
 
 [DEPENDENT TOOL RULE]
-If screen information is needed before saving a memory, first call desktop_vision_action and wait for the result. Then call memory_action in a later step using the exact result.
+If screen information is needed before taking another action, first call desktop_vision_action and wait for the result. Then use the exact result in a later step.
 `;
 
   let messagesToRun = [
@@ -318,9 +418,8 @@ If screen information is needed before saving a memory, first call desktop_visio
     const toolMessages: ToolMessage[] = [];
 
     /*
-     * Tools execute sequentially intentionally.
-     * It prevents race conditions such as vision and memory running
-     * simultaneously when memory depends on screen data.
+     * Tool execution is sequential intentionally.
+     * A later tool can depend on the exact output of an earlier one.
      */
     for (const toolCall of response.tool_calls) {
       throwIfAborted(signal);
@@ -339,15 +438,6 @@ If screen information is needed before saving a memory, first call desktop_visio
             },
             config ?? {},
           );
-        } else if (toolCall.name === "memory_action") {
-          toolResult = await invokeToolWithSignal(
-            memoryTool,
-            {
-              userRequest: toolCall.args.userRequest,
-              chatHistory: state.messages,
-            },
-            config ?? {},
-          );
         } else if (
           toolCall.name === "desktop_vision_action"
         ) {
@@ -358,25 +448,6 @@ If screen information is needed before saving a memory, first call desktop_visio
             },
             config ?? {},
           );
-        } else if (
-          toolCall.name === "generate_personalized_prompt"
-        ) {
-          toolResult = await invokeToolWithSignal(
-            personalizationTool,
-            {
-              recentMessages:
-                toolCall.args.recentMessages,
-            },
-            config ?? {},
-          );
-
-          if (
-            toolResult &&
-            !toolResult.startsWith("Error") &&
-            !toolResult.startsWith("Failed")
-          ) {
-            cachedPromptInMemory = toolResult;
-          }
         } else if (
           toolCall.name === "terminal_intent_executor"
         ) {
@@ -394,18 +465,6 @@ If screen information is needed before saving a memory, first call desktop_visio
             perplexityTool,
             {
               query: toolCall.args.query,
-            },
-            config ?? {},
-          );
-        } else if (
-          toolCall.name === "execute_research_pipeline"
-        ) {
-          toolResult = await invokeToolWithSignal(
-            researchTool,
-            {
-              query: toolCall.args.query,
-              sourceFolderPath:
-                toolCall.args.sourceFolderPath || "",
             },
             config ?? {},
           );
@@ -469,12 +528,8 @@ If screen information is needed before saving a memory, first call desktop_visio
     const combinedResults =
       toolResultsSummary.join("\n\n");
 
-    const lastMessage =
-      state.messages[state.messages.length - 1];
-
-    const originalUserRequest = lastMessage
-      ? getTextContent(lastMessage.content)
-      : "the user's request";
+    const originalUserRequest =
+      userText || "the user's request";
 
     const cleanContextPrompt = `
 The user's original request was: "${originalUserRequest}"
@@ -520,6 +575,18 @@ If a result is long, state only the most important conclusions and tell the user
       response.content,
     );
   }
+
+  /*
+   * Only this addition saves the complete user/assistant turn.
+   * It is called after the final response is ready.
+   */
+  const completedMessages: BaseMessage[] = [
+    ...state.messages,
+    response,
+  ];
+
+  saveShortMemoryInBackground(completedMessages);
+
 
   return {
     messages: [response],

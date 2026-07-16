@@ -25,30 +25,60 @@ export type SimilarMemoryResult = {
   memory: MemoryNode;
 };
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException(
+      "The operation was cancelled.",
+      "AbortError",
+    );
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException &&
+    error.name === "AbortError"
+  );
+}
+
 /**
  * Finds stored memories with embeddings similar to the provided memory.
  *
  * This method does not generate embeddings again. It compares the embedding
  * already present on the enriched memory against embeddings read from files.
+ *
+ * Tauri file-system operations cannot necessarily be interrupted once they
+ * have started. Abort checks prevent the pipeline from continuing before and
+ * after each async operation.
  */
 export async function findSimilarMemories(
   enrichedMemory: MemoryNode,
+  signal?: AbortSignal,
 ): Promise<SimilarMemoryResult[]> {
+  throwIfAborted(signal);
+
   if (!hasValidEmbedding(enrichedMemory)) {
     throw new Error(
       "The provided enriched memory does not contain a valid embedding.",
     );
   }
 
-  const memoryDirectoryExists = await exists(MEMORY_DIRECTORY, {
-    baseDir: BaseDirectory.AppData,
-  });
+  const memoryDirectoryExists = await exists(
+    MEMORY_DIRECTORY,
+    {
+      baseDir: BaseDirectory.AppData,
+    },
+  );
+
+  throwIfAborted(signal);
 
   if (!memoryDirectoryExists) {
     return [];
   }
 
-  const storedMemories = await readStoredMemories();
+  const storedMemories = await readStoredMemories(signal);
+
+  throwIfAborted(signal);
 
   if (storedMemories.length === 0) {
     return [];
@@ -74,6 +104,12 @@ export async function findSimilarMemories(
     ]),
   );
 
+  throwIfAborted(signal);
+
+  /*
+   * compareEmbeddingToList is synchronous, so no signal is passed to it.
+   * It only calculates similarity using embeddings already loaded in memory.
+   */
   const comparisonResult = textSimilarity.compareEmbeddingToList(
     enrichedMemory.embedding,
     compatibleMemories.map((storedMemory) => ({
@@ -81,6 +117,8 @@ export async function findSimilarMemories(
       embedding: storedMemory.memory.embedding,
     })),
   );
+
+  throwIfAborted(signal);
 
   return comparisonResult.matches
     .filter((match) => match.score >= SIMILARITY_THRESHOLD)
@@ -102,14 +140,22 @@ export async function findSimilarMemories(
     });
 }
 
-async function readStoredMemories(): Promise<StoredMemory[]> {
+async function readStoredMemories(
+  signal?: AbortSignal,
+): Promise<StoredMemory[]> {
+  throwIfAborted(signal);
+
   const entries = await readDir(MEMORY_DIRECTORY, {
     baseDir: BaseDirectory.AppData,
   });
 
+  throwIfAborted(signal);
+
   const storedMemories: StoredMemory[] = [];
 
   for (const entry of entries) {
+    throwIfAborted(signal);
+
     if (!entry.isFile) {
       continue;
     }
@@ -122,7 +168,12 @@ async function readStoredMemories(): Promise<StoredMemory[]> {
       continue;
     }
 
-    const storedMemory = await readMemory(entry.name);
+    const storedMemory = await readMemory(
+      entry.name,
+      signal,
+    );
+
+    throwIfAborted(signal);
 
     if (storedMemory) {
       storedMemories.push(storedMemory);
@@ -132,13 +183,20 @@ async function readStoredMemories(): Promise<StoredMemory[]> {
   return storedMemories;
 }
 
-async function readMemory(fileName: string): Promise<StoredMemory | null> {
+async function readMemory(
+  fileName: string,
+  signal?: AbortSignal,
+): Promise<StoredMemory | null> {
+  throwIfAborted(signal);
+
   const filePath = `${MEMORY_DIRECTORY}/${fileName}`;
 
   try {
     const fileContent = await readTextFile(filePath, {
       baseDir: BaseDirectory.AppData,
     });
+
+    throwIfAborted(signal);
 
     const parsedMemory: unknown = JSON.parse(fileContent);
 
@@ -155,6 +213,14 @@ async function readMemory(fileName: string): Promise<StoredMemory | null> {
       memory: parsedMemory as MemoryNode,
     };
   } catch (error) {
+    /*
+     * Cancellation is not a file-read failure. It must propagate upward so
+     * the complete memory-creation pipeline stops.
+     */
+    if (isAbortError(error)) {
+      throw error;
+    }
+
     console.warn(`Unable to read memory file: ${fileName}`, error);
 
     return null;
