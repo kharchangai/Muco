@@ -293,7 +293,7 @@ async function evaluateMemoryGate(
 ): Promise<MemoryGateResult> {
   throwIfAborted(signal);
 
-  const model = await getAsyncLLM("cheap");
+  const model = await getAsyncLLM("medium");
 
   throwIfAborted(signal);
 

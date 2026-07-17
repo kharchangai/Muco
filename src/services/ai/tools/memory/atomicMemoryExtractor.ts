@@ -100,7 +100,7 @@ export async function extractAtomicMemories(
   }
 
   try {
-    const model = await getAsyncLLM("cheap");
+    const model = await getAsyncLLM("medium");
 
     throwIfAborted(signal);
 
