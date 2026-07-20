@@ -674,7 +674,7 @@ export const callMainAgent = async (
 
   throwIfAborted(signal);
 
-  const llm = await getAsyncLLM();
+  const llm = await getAsyncLLM("expensive");
 
   throwIfAborted(signal);
 
