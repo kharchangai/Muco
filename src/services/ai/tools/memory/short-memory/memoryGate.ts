@@ -12,26 +12,13 @@ export type AgentMemoryMessage = {
 };
 
 const memoryGateSchema = z.object({
-  useRecentTurns: z
-    .boolean()
-    .describe("Whether recent conversation turns are needed."),
+  useRecentTurns: z.boolean(),
 
-  recentTurnCount: z
-    .number()
-    .int()
-    .min(0)
-    .max(10)
-    .describe("Number of recent turns to load. Use 0 when not needed."),
+  recentTurnCount: z.number().int().min(0).max(10),
 
-  useRelevantMemorySearch: z
-    .boolean()
-    .describe(
-      "Whether semantic search in previous short-term memory is needed.",
-    ),
+  useRelevantMemorySearch: z.boolean(),
 
-  reason: z
-    .string()
-    .describe("A short internal explanation for the decision."),
+  reason: z.string(),
 });
 
 export type MemoryGateDecision = z.infer<typeof memoryGateSchema>;
@@ -41,12 +28,27 @@ export type MemoryGateResult = {
   decision: MemoryGateDecision;
 };
 
-function createEmptyDecision(): MemoryGateDecision {
+type LlmResponseContent =
+  | string
+  | Array<
+      | string
+      | {
+          type?: string;
+          text?: string;
+          content?: string;
+        }
+    >
+  | null
+  | undefined;
+
+function createEmptyDecision(
+  reason = "No memory is needed.",
+): MemoryGateDecision {
   return {
     useRecentTurns: false,
     recentTurnCount: 0,
     useRelevantMemorySearch: false,
-    reason: "No memory is needed.",
+    reason,
   };
 }
 
@@ -72,6 +74,184 @@ function removeDuplicateMessages(
   });
 }
 
+function getTextFromLlmContent(
+  content: LlmResponseContent,
+): string {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+
+      if (!part || typeof part !== "object") {
+        return "";
+      }
+
+      if (typeof part.text === "string") {
+        return part.text;
+      }
+
+      if (typeof part.content === "string") {
+        return part.content;
+      }
+
+      return "";
+    })
+    .join("")
+    .trim();
+}
+
+function removeCodeFence(text: string): string {
+  return text
+    .trim()
+    .replace(/^```(?:json|JSON)?\s*/u, "")
+    .replace(/\s*```$/u, "")
+    .trim();
+}
+
+function findJsonObject(text: string): string | null {
+  const cleanedText = removeCodeFence(text);
+
+  if (
+    cleanedText.startsWith("{") &&
+    cleanedText.endsWith("}")
+  ) {
+    return cleanedText;
+  }
+
+  const firstBraceIndex = cleanedText.indexOf("{");
+
+  if (firstBraceIndex === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let insideString = false;
+  let escaped = false;
+
+  for (
+    let index = firstBraceIndex;
+    index < cleanedText.length;
+    index += 1
+  ) {
+    const character = cleanedText[index];
+
+    if (insideString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (character === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (character === '"') {
+        insideString = false;
+      }
+
+      continue;
+    }
+
+    if (character === '"') {
+      insideString = true;
+      continue;
+    }
+
+    if (character === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (character === "}") {
+      depth -= 1;
+
+      if (depth === 0) {
+        return cleanedText.slice(firstBraceIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseMemoryGateDecision(
+  content: LlmResponseContent,
+): MemoryGateDecision {
+  const responseText = getTextFromLlmContent(content);
+
+  if (!responseText) {
+    throw new Error("The model returned an empty response.");
+  }
+
+  const jsonText = findJsonObject(responseText);
+
+  if (!jsonText) {
+    throw new Error(
+      `Could not find a JSON object in the model response: ${responseText}`,
+    );
+  }
+
+  const parsedJson: unknown = JSON.parse(jsonText);
+
+  return memoryGateSchema.parse(parsedJson);
+}
+
+function buildMemoryGateSystemPrompt(): string {
+  return `${memoryGatePrompt}
+
+Return exactly one valid JSON object.
+
+Do not use Markdown.
+Do not use a code block.
+Do not include any explanation before or after the JSON.
+
+The JSON must have exactly this structure:
+
+{
+  "useRecentTurns": boolean,
+  "recentTurnCount": integer,
+  "useRelevantMemorySearch": boolean,
+  "reason": string
+}
+
+Rules:
+- "recentTurnCount" must be an integer from 0 to 10.
+- Set "recentTurnCount" to 0 when "useRecentTurns" is false.
+- "reason" must be short.
+`;
+}
+
+async function getMemoryGateDecision(
+  userMessage: string,
+): Promise<MemoryGateDecision> {
+  const llm = await getAsyncLLM("medium");
+
+  const response = await llm.invoke([
+    {
+      role: "system",
+      content: buildMemoryGateSystemPrompt(),
+    },
+    {
+      role: "user",
+      content: userMessage,
+    },
+  ]);
+
+  return parseMemoryGateDecision(
+    response.content as LlmResponseContent,
+  );
+}
+
 export async function getMemoryForAgent(
   userMessage: string,
 ): Promise<MemoryGateResult> {
@@ -85,22 +265,9 @@ export async function getMemoryForAgent(
   }
 
   try {
-    const llm = await getAsyncLLM("medium");
-
-    const structuredLlm = llm.withStructuredOutput(
-      memoryGateSchema,
+    const decision = await getMemoryGateDecision(
+      normalizedUserMessage,
     );
-
-    const decision = await structuredLlm.invoke([
-      {
-        role: "system",
-        content: memoryGatePrompt,
-      },
-      {
-        role: "user",
-        content: normalizedUserMessage,
-      },
-    ]);
 
     const memoryRequests: Promise<AgentMemoryMessage[]>[] = [];
 
@@ -128,12 +295,8 @@ export async function getMemoryForAgent(
 
     const memoryGroups = await Promise.all(memoryRequests);
 
-    const messages = removeDuplicateMessages(
-      memoryGroups.flat(),
-    );
-
     return {
-      messages,
+      messages: removeDuplicateMessages(memoryGroups.flat()),
       decision,
     };
   } catch (error) {
@@ -141,7 +304,9 @@ export async function getMemoryForAgent(
 
     return {
       messages: [],
-      decision: createEmptyDecision(),
+      decision: createEmptyDecision(
+        "Memory gate failed, so memory retrieval was skipped.",
+      ),
     };
   }
 }

@@ -38,6 +38,19 @@ export type ProcessUserMessageResult = {
   failures: MemoryCreationFailure[];
 };
 
+type LlmContent =
+  | string
+  | Array<
+      | string
+      | {
+          type?: string;
+          text?: string;
+          content?: string;
+        }
+    >
+  | null
+  | undefined;
+
 const createAbortError = (): DOMException => {
   return new DOMException(
     "The operation was cancelled.",
@@ -69,18 +82,6 @@ export const isAbortError = (
 
 /**
  * Processes one raw user message for long-term memory.
- *
- * Cancellation behavior:
- * - If the signal is already aborted, throws AbortError immediately.
- * - Stops before every next pipeline stage.
- * - Passes the signal to LLM-based extraction and memory creation.
- * - Does not convert AbortError to a normal memory failure.
- *
- * Pipeline:
- * 1. Evaluate the memory gate.
- * 2. Ensure AppData/memory exists.
- * 3. Extract atomic memory candidates.
- * 4. Create memories sequentially.
  */
 export async function processUserMessage(
   userText: string,
@@ -88,10 +89,12 @@ export async function processUserMessage(
 ): Promise<ProcessUserMessageResult> {
   throwIfAborted(signal);
 
-  const text = userText?.trim();
+  const text = typeof userText === "string"
+    ? userText.trim()
+    : "";
 
   const emptyResult: ProcessUserMessageResult = {
-    userText: text ?? "",
+    userText: text,
     gate: null,
     atomicMemories: [],
     createdMemories: [],
@@ -107,10 +110,7 @@ export async function processUserMessage(
   try {
     throwIfAborted(signal);
 
-    gate = await evaluateMemoryGate(
-      text,
-      signal,
-    );
+    gate = await evaluateMemoryGate(text, signal);
 
     throwIfAborted(signal);
   } catch (error) {
@@ -125,8 +125,8 @@ export async function processUserMessage(
 
     /*
      * Fail closed:
-     * If the gate cannot make a decision, do not accidentally run
-     * the expensive memory pipeline.
+     * If the decision cannot be parsed, do not run the long-term
+     * memory extraction and creation pipeline.
      */
     return {
       ...emptyResult,
@@ -153,9 +153,7 @@ export async function processUserMessage(
   try {
     throwIfAborted(signal);
 
-    await ensureMemoryDirectoryExists(
-      signal,
-    );
+    await ensureMemoryDirectoryExists(signal);
 
     throwIfAborted(signal);
   } catch (error) {
@@ -185,10 +183,6 @@ export async function processUserMessage(
   try {
     throwIfAborted(signal);
 
-    /*
-     * extractAtomicMemories must accept:
-     * (userText: string, signal?: AbortSignal)
-     */
     atomicMemories = await extractAtomicMemories(
       text,
       signal,
@@ -229,19 +223,13 @@ export async function processUserMessage(
   const failures: MemoryCreationFailure[] = [];
 
   /*
-   * Keep this sequential.
-   *
-   * createMemory may search, evolve, redirect, update, or save files that
-   * are relevant to the next atomic memory in the same user message.
+   * This must stay sequential because each created memory can affect
+   * duplicate detection, linking, and updates for the next memory.
    */
   for (const atomicMemory of atomicMemories) {
     throwIfAborted(signal);
 
     try {
-      /*
-       * createMemory must accept:
-       * (content: string, signal?: AbortSignal)
-       */
       const createdMemory = await createMemory(
         atomicMemory.content,
         signal,
@@ -251,10 +239,6 @@ export async function processUserMessage(
 
       createdMemories.push(createdMemory);
     } catch (error) {
-      /*
-       * Cancellation must immediately stop the entire pipeline.
-       * It is not a per-memory failure.
-       */
       if (isAbortError(error)) {
         throw error;
       }
@@ -284,8 +268,10 @@ export async function processUserMessage(
 }
 
 /**
- * Uses the cheap model to decide whether a raw user message is worth
- * sending to the long-term memory pipeline.
+ * Uses a normal LLM invoke call instead of withStructuredOutput().
+ *
+ * This avoids provider-specific structured-output failures, including
+ * "Text: undefined" from OpenAI-compatible providers.
  */
 async function evaluateMemoryGate(
   userText: string,
@@ -297,25 +283,15 @@ async function evaluateMemoryGate(
 
   throwIfAborted(signal);
 
-  const structuredModel = model.withStructuredOutput(
-    memoryGateSchema,
-  );
-
-  const result = await structuredModel.invoke(
+  const response = await model.invoke(
     [
       {
         role: "system",
-        content: MEMORY_GATE_PROMPT,
+        content: buildMemoryGatePrompt(),
       },
       {
         role: "user",
-        content: JSON.stringify(
-          {
-            userText,
-          },
-          null,
-          2,
-        ),
+        content: JSON.stringify({ userText }),
       },
     ],
     {
@@ -325,14 +301,171 @@ async function evaluateMemoryGate(
 
   throwIfAborted(signal);
 
-  return result;
+  return parseMemoryGateResponse(response.content);
+}
+
+function buildMemoryGatePrompt(): string {
+  return `${MEMORY_GATE_PROMPT}
+
+Return exactly one valid JSON object and nothing else.
+
+Do not use Markdown.
+Do not wrap the JSON in a code block.
+Do not write explanations before or after the JSON.
+
+The required JSON format is:
+
+{
+  "shouldUseMemory": boolean,
+  "reason": string
+}
+
+Rules:
+- "shouldUseMemory" must be true only if the user message contains
+  durable, useful information that should be stored in long-term memory.
+- "reason" must be a short non-empty string.
+`;
+}
+
+function parseMemoryGateResponse(
+  content: LlmContent,
+): MemoryGateResult {
+  const responseText = getTextFromLlmContent(content);
+
+  if (!responseText) {
+    throw new Error(
+      "Memory gate model returned an empty response.",
+    );
+  }
+
+  const jsonText = extractFirstJsonObject(responseText);
+
+  if (!jsonText) {
+    throw new Error(
+      `Memory gate response did not contain a JSON object. Response: ${responseText}`,
+    );
+  }
+
+  let parsedValue: unknown;
+
+  try {
+    parsedValue = JSON.parse(jsonText);
+  } catch (error) {
+    throw new Error(
+      `Memory gate returned invalid JSON: ${getErrorMessage(error)}`,
+    );
+  }
+
+  return memoryGateSchema.parse(parsedValue);
+}
+
+function getTextFromLlmContent(
+  content: LlmContent,
+): string {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+
+      if (!part || typeof part !== "object") {
+        return "";
+      }
+
+      if (typeof part.text === "string") {
+        return part.text;
+      }
+
+      if (typeof part.content === "string") {
+        return part.content;
+      }
+
+      return "";
+    })
+    .join("")
+    .trim();
+}
+
+/**
+ * Extracts the first complete JSON object while respecting quoted strings,
+ * escaped quotes, and braces inside JSON string values.
+ */
+function extractFirstJsonObject(
+  responseText: string,
+): string | null {
+  const text = responseText
+    .trim()
+    .replace(/^```(?:json)?\s*/iu, "")
+    .replace(/\s*```$/u, "")
+    .trim();
+
+  const startIndex = text.indexOf("{");
+
+  if (startIndex === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let isInsideString = false;
+  let isEscaped = false;
+
+  for (
+    let index = startIndex;
+    index < text.length;
+    index += 1
+  ) {
+    const character = text[index];
+
+    if (isInsideString) {
+      if (isEscaped) {
+        isEscaped = false;
+        continue;
+      }
+
+      if (character === "\\") {
+        isEscaped = true;
+        continue;
+      }
+
+      if (character === '"') {
+        isInsideString = false;
+      }
+
+      continue;
+    }
+
+    if (character === '"') {
+      isInsideString = true;
+      continue;
+    }
+
+    if (character === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (character === "}") {
+      depth -= 1;
+
+      if (depth === 0) {
+        return text.slice(startIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
  * Ensures AppData/memory exists.
- *
- * Tauri file operations cannot always be interrupted once started,
- * but checks before and after prevent the next pipeline stage from running.
  */
 async function ensureMemoryDirectoryExists(
   signal?: AbortSignal,
